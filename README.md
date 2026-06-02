@@ -61,6 +61,18 @@ stdout_logfile=/data/logs/demo/demo-member.log
 - `programName = {jobName}_{moduleName}`
 - `configName = {programName}.ini`
 - `jarName` 为空时自动使用 `{moduleName}.jar`
+- 以下 Supervisor 参数是系统固定策略，前端不需要也不能传入：
+  - `autostart=true`
+  - `startsecs=10`
+  - `autorestart=true`
+  - `startretries=3`
+  - `priority=999`
+  - `redirect_stderr=true`
+  - `stdout_logfile_maxbytes=1GB`
+  - `stdout_logfile_backups=1`
+  - `stopasgroup=false`
+  - `killasgroup=false`
+- `autoStart` 仅用于控制本次接口执行完成后是否立即启动服务，不会改变模板中的 `autostart=true`
 
 ## 配置
 
@@ -144,9 +156,6 @@ curl -X POST http://127.0.0.1:18880/api/supervisor/services \
     "xms": "128m",
     "xmx": "128m",
     "user": "root",
-    "priority": 999,
-    "autostart": true,
-    "autorestart": true,
     "autoStart": false
   }'
 ```
@@ -168,9 +177,6 @@ curl -X PUT http://127.0.0.1:18880/api/supervisor/services/demo-project_member \
     "xms": "128m",
     "xmx": "128m",
     "user": "root",
-    "priority": 999,
-    "autostart": true,
-    "autorestart": true,
     "autoStart": false
   }'
 ```

@@ -32,7 +32,4 @@ def test_request_rejects_invalid_module_name():
             xms="128m",
             xmx="128m",
             user="root",
-            priority=999,
-            autostart=True,
-            autorestart=True,
         )

@@ -5,7 +5,7 @@ import configparser
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -20,6 +20,19 @@ PROFILE_PATTERN = re.compile(r"-Dspring\.profiles\.active=(?P<value>\S+)")
 XMS_PATTERN = re.compile(r"-Xms(?P<value>\S+)")
 XMX_PATTERN = re.compile(r"-Xmx(?P<value>\S+)")
 JAR_PATTERN = re.compile(r"(?P<value>/\S+\.jar)")
+
+FIXED_TEMPLATE_OPTIONS: dict[str, Any] = {
+    "autostart": "true",
+    "startsecs": 10,
+    "autorestart": "true",
+    "startretries": 3,
+    "priority": 999,
+    "redirect_stderr": "true",
+    "stdout_logfile_maxbytes": "1GB",
+    "stdout_logfile_backups": 1,
+    "stopasgroup": "false",
+    "killasgroup": "false",
+}
 
 
 @dataclass(frozen=True)
@@ -90,10 +103,7 @@ class TemplateService:
             "xms": payload.xms,
             "xmx": payload.xmx,
             "user": payload.user,
-            "priority": payload.priority,
-            "autostart": str(payload.autostart).lower(),
-            "autorestart": str(payload.autorestart).lower(),
-            **self.settings.supervisor.template_defaults,
+            **FIXED_TEMPLATE_OPTIONS,
         }
 
         template = self.environment.get_template("supervisor_program.ini.j2")

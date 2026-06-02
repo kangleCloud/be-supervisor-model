@@ -7,14 +7,6 @@ app:
 supervisor:
   confDir: /etc/supervisord.d
   commandTimeoutSeconds: 30
-  templateDefaults:
-    startsecs: 10
-    startretries: 3
-    redirect_stderr: true
-    stdout_logfile_maxbytes: 1GB
-    stdout_logfile_backups: 1
-    stopasgroup: false
-    killasgroup: false
 
 executor:
   type: local

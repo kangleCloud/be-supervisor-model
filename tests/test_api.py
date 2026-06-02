@@ -15,9 +15,6 @@ def _payload(host: str, module_name: str = "member", port: int = 9001, auto_star
         "xms": "128m",
         "xmx": "128m",
         "user": "root",
-        "priority": 999,
-        "autostart": True,
-        "autorestart": True,
         "autoStart": auto_start,
     }
 
@@ -94,3 +91,18 @@ def test_api_rejects_invalid_config_name(client):
     assert response.status_code == 400
     assert response.json()["code"] == 40002
     assert response.json()["data"] is None
+
+
+def test_api_rejects_removed_supervisor_template_fields(client):
+    response = client.post(
+        "/api/supervisor/services",
+        json={
+            **_payload("127.0.0.1"),
+            "priority": 999,
+            "autostart": True,
+            "autorestart": True,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40000

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -19,16 +19,6 @@ DEFAULT_EXECUTOR_TYPE = "local"
 DEFAULT_ANSIBLE_INVENTORY_PATH = "/etc/ansible/deploy_host"
 DEFAULT_ANSIBLE_REMOTE_USER = "root"
 DEFAULT_ALLOWED_LOG_LEVELS = {"critical", "error", "warning", "info", "debug"}
-
-DEFAULT_TEMPLATE_DEFAULTS: dict[str, Any] = {
-    "startsecs": 10,
-    "startretries": 3,
-    "redirect_stderr": True,
-    "stdout_logfile_maxbytes": "1GB",
-    "stdout_logfile_backups": 1,
-    "stopasgroup": False,
-    "killasgroup": False,
-}
 
 DEFAULT_HOSTS: list[dict[str, Any]] = [
     {"name": "local", "ip": "127.0.0.1", "enabled": True, "executorType": "local"},
@@ -54,7 +44,6 @@ class SupervisorSettings:
 
     conf_dir: Path
     command_timeout_seconds: int
-    template_defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -231,10 +220,6 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
             ("supervisor", "commandTimeoutSeconds"),
             DEFAULT_COMMAND_TIMEOUT,
         ),
-        template_defaults={
-            **DEFAULT_TEMPLATE_DEFAULTS,
-            **(_get_nested(config_data, "supervisor", "templateDefaults", default={}) or {}),
-        },
     )
 
     executor_settings = ExecutorSettings(
