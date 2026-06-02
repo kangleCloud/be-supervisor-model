@@ -1,0 +1,15 @@
+[program:{{ program_name }}]
+command={{ java_path }} -jar -Xms{{ xms }} -Xmx{{ xmx }} -Dspring.profiles.active={{ active }} -Dserver.port={{ port }} /data/content/{{ job_name }}/{{ module_name }}/{{ jar_name }}
+directory=/data/content/{{ job_name }}/{{ module_name }}
+autostart={{ autostart }}
+startsecs={{ startsecs }}
+autorestart={{ autorestart }}
+startretries={{ startretries }}
+user={{ user }}
+priority={{ priority }}
+redirect_stderr={{ redirect_stderr | string | lower }}
+stdout_logfile_maxbytes={{ stdout_logfile_maxbytes }}
+stdout_logfile_backups={{ stdout_logfile_backups }}
+stopasgroup={{ stopasgroup | string | lower }}
+killasgroup={{ killasgroup | string | lower }}
+stdout_logfile=/data/logs/{{ job_name }}/{{ job_name }}-{{ module_name }}.log
