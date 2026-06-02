@@ -19,7 +19,7 @@ def test_reject_path_traversal_config_name():
 
 
 def test_request_rejects_invalid_module_name():
-    with pytest.raises(ValueError):
+    with pytest.raises(ParamError):
         ServiceUpsertRequest(
             host="127.0.0.1",
             jobName="demo",

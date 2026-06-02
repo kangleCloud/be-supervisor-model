@@ -20,10 +20,13 @@ def test_backup_restore_and_archive_names(settings, test_environment):
     first_backup = service.backup_config("127.0.0.1", "demo_member.ini", "demo_member")
     config_path.write_text(build_ini("demo_member", 9002), encoding="utf-8")
     second_backup = service.backup_config("127.0.0.1", "demo_member.ini", "demo_member")
+    config_path.write_text(build_ini("demo_member", 9003), encoding="utf-8")
     restore_result = service.restore_config("127.0.0.1", "demo_member.ini", "demo_member")
 
     assert first_backup["backupPath"].endswith("demo_member.ini.bak")
     assert second_backup["archivedBackupPath"] is not None
     assert (conf_dir / "demo_member.ini.bak").exists()
     assert restore_result["archivedCurrentPath"] is not None
-    assert "9002" not in config_path.read_text(encoding="utf-8")
+    restored_content = config_path.read_text(encoding="utf-8")
+    assert "9003" not in restored_content
+    assert "9002" in restored_content
