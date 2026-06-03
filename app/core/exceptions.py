@@ -22,6 +22,13 @@ class ParamError(AppError):
         super().__init__(400, 40000, msg, data)
 
 
+class UnauthorizedError(AppError):
+    """未授权或登录失效。"""
+
+    def __init__(self, msg: str = "未登录或登录已过期", data: Any = None):
+        super().__init__(401, 40100, msg, data)
+
+
 class InvalidHostError(AppError):
     """非法目标主机。"""
 

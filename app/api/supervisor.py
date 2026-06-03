@@ -1,10 +1,12 @@
 """Supervisor 管理 API。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.config import get_settings
-from app.core.security import verify_api_token_dependency
+from app.core.security import verify_jwt_dependency
 from app.core.response import ok
 from app.schemas.supervisor import DeleteServiceQuery, HostRequest, PortCheckQuery, ServiceUpsertRequest
 from app.services.config_file_service import ConfigFileService
@@ -16,9 +18,9 @@ from app.services.template_service import TemplateService
 
 
 router = APIRouter(
-    prefix="/api/supervisor",
+    prefix="/admin/api/supervisor",
     tags=["Supervisor 管理"],
-    dependencies=[Depends(verify_api_token_dependency)],
+    dependencies=[Depends(verify_jwt_dependency)],
 )
 
 
@@ -161,7 +163,7 @@ def restore_service(program_name: str, payload: HostRequest, manager: Supervisor
 def check_ports(
     host: str = Query(..., description="目标主机 IP"),
     port: int = Query(..., description="待检测端口"),
-    exclude_config: str | None = Query(default=None, alias="excludeConfig", description="排除的当前配置文件名"),
+    exclude_config: Optional[str] = Query(default=None, alias="excludeConfig", description="排除的当前配置文件名"),
     manager: SupervisorManager = Depends(get_manager),
 ):
     validated = PortCheckQuery(host=host, port=port, excludeConfig=exclude_config)
@@ -196,7 +198,7 @@ def update(payload: HostRequest, manager: SupervisorManager = Depends(get_manage
 )
 def status(
     host: str = Query(..., description="目标主机 IP"),
-    program_name: str | None = Query(default=None, alias="programName", description="可选，指定服务名"),
+    program_name: Optional[str] = Query(default=None, alias="programName", description="可选，指定服务名"),
     manager: SupervisorManager = Depends(get_manager),
 ):
     return ok(manager.status(host, program_name), msg="查询状态成功")

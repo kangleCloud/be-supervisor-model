@@ -13,6 +13,12 @@ import yaml
 DEFAULT_APP_HOST = "0.0.0.0"
 DEFAULT_APP_PORT = 18880
 DEFAULT_APP_LOG_LEVEL = "info"
+DEFAULT_DATABASE_HOST = "127.0.0.1"
+DEFAULT_DATABASE_PORT = 3306
+DEFAULT_DATABASE_NAME = "supervisor_model"
+DEFAULT_DATABASE_USER = "root"
+DEFAULT_DATABASE_CONNECT_TIMEOUT = 5
+DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 480
 DEFAULT_CONF_DIR = "/etc/supervisord.d"
 DEFAULT_COMMAND_TIMEOUT = 30
 DEFAULT_EXECUTOR_TYPE = "local"
@@ -35,7 +41,26 @@ class AppSettings:
     host: str
     port: int
     log_level: str
-    api_token: str
+
+
+@dataclass(frozen=True)
+class DatabaseSettings:
+    """数据库连接配置。"""
+
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str
+    connect_timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class AuthSettings:
+    """认证相关配置。"""
+
+    jwt_secret: str
+    access_token_expire_minutes: int
 
 
 @dataclass(frozen=True)
@@ -74,6 +99,8 @@ class Settings:
     repo_root: Path
     config_path: Path
     app: AppSettings
+    database: DatabaseSettings
+    auth: AuthSettings
     supervisor: SupervisorSettings
     executor: ExecutorSettings
     hosts: tuple[HostConfig, ...]
@@ -118,6 +145,19 @@ def _optional_string(
     if config_value is None:
         return default
     return str(config_value).strip() or default
+
+
+def _required_string(
+    environ: Mapping[str, str],
+    env_key: str,
+    config_data: Mapping[str, Any],
+    config_keys: tuple[str, ...],
+    default: str = "",
+) -> str:
+    value = _optional_string(environ, env_key, config_data, config_keys, default)
+    if not value:
+        raise ValueError(f"{env_key} 不能为空")
+    return value
 
 
 def _optional_int(
@@ -208,7 +248,32 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         host=_optional_string(raw_environ, "APP_HOST", config_data, ("app", "host"), DEFAULT_APP_HOST),
         port=_optional_int(raw_environ, "APP_PORT", config_data, ("app", "port"), DEFAULT_APP_PORT),
         log_level=_optional_log_level(raw_environ, "APP_LOG_LEVEL", config_data, ("app", "logLevel"), DEFAULT_APP_LOG_LEVEL),
-        api_token=_optional_string(raw_environ, "API_TOKEN", config_data, ("app", "apiToken"), ""),
+    )
+
+    database_settings = DatabaseSettings(
+        host=_optional_string(raw_environ, "DATABASE_HOST", config_data, ("database", "host"), DEFAULT_DATABASE_HOST),
+        port=_optional_int(raw_environ, "DATABASE_PORT", config_data, ("database", "port"), DEFAULT_DATABASE_PORT),
+        database=_required_string(raw_environ, "DATABASE_NAME", config_data, ("database", "name"), DEFAULT_DATABASE_NAME),
+        user=_optional_string(raw_environ, "DATABASE_USER", config_data, ("database", "user"), DEFAULT_DATABASE_USER),
+        password=_optional_string(raw_environ, "DATABASE_PASSWORD", config_data, ("database", "password"), ""),
+        connect_timeout_seconds=_optional_int(
+            raw_environ,
+            "DATABASE_CONNECT_TIMEOUT_SECONDS",
+            config_data,
+            ("database", "connectTimeoutSeconds"),
+            DEFAULT_DATABASE_CONNECT_TIMEOUT,
+        ),
+    )
+
+    auth_settings = AuthSettings(
+        jwt_secret=_required_string(raw_environ, "JWT_SECRET", config_data, ("auth", "jwtSecret")),
+        access_token_expire_minutes=_optional_int(
+            raw_environ,
+            "ACCESS_TOKEN_EXPIRE_MINUTES",
+            config_data,
+            ("auth", "accessTokenExpireMinutes"),
+            DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES,
+        ),
     )
 
     supervisor_settings = SupervisorSettings(
@@ -254,6 +319,8 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         repo_root=repo_root,
         config_path=config_path,
         app=app_settings,
+        database=database_settings,
+        auth=auth_settings,
         supervisor=supervisor_settings,
         executor=executor_settings,
         hosts=_load_hosts(config_data, executor_settings.default_type),

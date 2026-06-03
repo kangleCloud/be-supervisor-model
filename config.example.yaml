@@ -2,7 +2,18 @@ app:
   host: 0.0.0.0
   port: 18880
   logLevel: info
-  apiToken: ""
+
+database:
+  host: 127.0.0.1
+  port: 3306
+  name: supervisor_model
+  user: root
+  password: ""
+  connectTimeoutSeconds: 5
+
+auth:
+  jwtSecret: please-change-me-to-a-32-char-secret
+  accessTokenExpireMinutes: 480
 
 supervisor:
   confDir: /etc/supervisord.d

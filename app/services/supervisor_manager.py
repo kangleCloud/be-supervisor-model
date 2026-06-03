@@ -1,6 +1,8 @@
 """Supervisor 业务编排服务。"""
 from __future__ import annotations
 
+from typing import Optional
+
 from app.core.exceptions import ConfigAlreadyExistsError
 from app.core.security import ensure_safe_program_name
 from app.schemas.supervisor import ServiceUpsertRequest
@@ -189,12 +191,12 @@ class SupervisorManager:
         """执行 update。"""
         return {"host": host, "result": self.supervisor_service.update(host)}
 
-    def status(self, host: str, program_name: str | None = None) -> list[dict[str, object]]:
+    def status(self, host: str, program_name: Optional[str] = None) -> list[dict[str, object]]:
         """查询 Supervisor 状态。"""
         self.host_service.get_host(host)
         return [item.to_dict() for item in self.supervisor_service.status(host, program_name)]
 
-    def check_port(self, host: str, port: int, exclude_config: str | None = None) -> dict[str, object]:
+    def check_port(self, host: str, port: int, exclude_config: Optional[str] = None) -> dict[str, object]:
         """执行端口冲突检测。"""
         self.host_service.get_host(host)
         conflicts = self.port_check_service.find_conflicts(host, port, exclude_config=exclude_config)

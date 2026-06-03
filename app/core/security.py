@@ -8,7 +8,8 @@ from typing import Optional
 from fastapi import Depends, Header
 
 from app.core.config import Settings, get_settings
-from app.core.exceptions import InvalidConfigNameError, ParamError
+from app.core.exceptions import InvalidConfigNameError, ParamError, UnauthorizedError
+from app.services.auth_service import AuthService, AuthenticatedUser
 
 
 SAFE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
@@ -83,15 +84,21 @@ def ensure_valid_port(port: int) -> int:
     return port
 
 
-def verify_api_token_dependency(
-    x_api_token: Optional[str] = Header(default=None, alias="X-API-Token"),
-    settings: Settings = Depends(get_settings),
-) -> None:
-    """预留 API Token 鉴权扩展点。"""
-    if not settings.app.api_token:
-        return
+def extract_bearer_token(authorization: Optional[str]) -> str:
+    """从 Authorization 头中提取 Bearer Token。"""
+    raw_value = (authorization or "").strip()
+    if not raw_value:
+        raise UnauthorizedError("缺少登录凭证")
+    token_type, _, token = raw_value.partition(" ")
+    if token_type.lower() != "bearer" or not token.strip():
+        raise UnauthorizedError("Authorization 头格式必须为 Bearer Token")
+    return token.strip()
 
-    if not x_api_token:
-        raise ParamError("缺少 API Token")
-    if x_api_token != settings.app.api_token:
-        raise ParamError("API Token 无效")
+
+def verify_jwt_dependency(
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+    settings: Settings = Depends(get_settings),
+) -> AuthenticatedUser:
+    """统一校验 Bearer JWT，并绑定服务端会话。"""
+    token = extract_bearer_token(authorization)
+    return AuthService(settings).authenticate_access_token(token)

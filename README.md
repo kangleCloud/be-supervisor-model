@@ -4,6 +4,13 @@
 
 它面向运维后台或后续前端管理系统，提供主机查询、服务配置新增/修改/删除、备份还原、端口冲突检测，以及 `supervisorctl` 常用命令的 REST API。
 
+当前版本已经内置轻量登录鉴权：
+
+- 认证接口统一走 `/admin/api/auth/*`
+- Supervisor 管理接口统一走 `/admin/api/supervisor/*`
+- 使用 `Authorization: Bearer <jwt>` 访问受保护接口
+- 登录会话与登录审计落到 MySQL 8
+
 ## 技术栈
 
 - Python 3.12
@@ -11,6 +18,9 @@
 - Pydantic
 - Jinja2
 - PyYAML
+- PyMySQL
+- PyJWT
+- bcrypt
 - pytest
 
 ## 执行模型
@@ -86,13 +96,28 @@ cp config.example.yaml config.yaml
 关键配置项：
 
 - `APP_HOST` / `APP_PORT`
+- `DATABASE_HOST` / `DATABASE_PORT` / `DATABASE_NAME`
+- `DATABASE_USER` / `DATABASE_PASSWORD`
+- `JWT_SECRET`
+- `ACCESS_TOKEN_EXPIRE_MINUTES`
 - `SUPERVISOR_CONF_DIR`
 - `COMMAND_TIMEOUT_SECONDS`
 - `EXECUTOR_TYPE`
 - `ANSIBLE_INVENTORY_PATH`
-- `API_TOKEN`
 
 主机列表示例见 [config.example.yaml](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/config.example.yaml:1)。
+
+数据库启动规则：
+
+- 服务启动时会自动创建目标数据库（若不存在）
+- 会自动执行 `app/database/migrations/*.sql` 中的表结构迁移
+- 账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
+
+密码哈希可以使用脚本生成：
+
+```bash
+python scripts/hash_password.py
+```
 
 ## 启动方式
 
@@ -111,21 +136,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 
 ## API 列表
 
-- `GET /api/supervisor/hosts`
-- `GET /api/supervisor/services?host=127.0.0.1`
-- `GET /api/supervisor/services/{programName}?host=127.0.0.1`
-- `POST /api/supervisor/services`
-- `PUT /api/supervisor/services/{programName}`
-- `DELETE /api/supervisor/services/{programName}?host=127.0.0.1&deleteBackup=false`
-- `POST /api/supervisor/services/{programName}/start`
-- `POST /api/supervisor/services/{programName}/stop`
-- `POST /api/supervisor/services/{programName}/restart`
-- `POST /api/supervisor/services/{programName}/backup`
-- `POST /api/supervisor/services/{programName}/restore`
-- `GET /api/supervisor/ports/check?host=127.0.0.1&port=9001`
-- `POST /api/supervisor/reread`
-- `POST /api/supervisor/update`
-- `GET /api/supervisor/status?host=127.0.0.1`
+- `POST /admin/api/auth/login`
+- `GET /admin/api/auth/me`
+- `POST /admin/api/auth/logout`
+- `GET /admin/api/supervisor/hosts`
+- `GET /admin/api/supervisor/services?host=127.0.0.1`
+- `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`
+- `POST /admin/api/supervisor/services`
+- `PUT /admin/api/supervisor/services/{programName}`
+- `DELETE /admin/api/supervisor/services/{programName}?host=127.0.0.1&deleteBackup=false`
+- `POST /admin/api/supervisor/services/{programName}/start`
+- `POST /admin/api/supervisor/services/{programName}/stop`
+- `POST /admin/api/supervisor/services/{programName}/restart`
+- `POST /admin/api/supervisor/services/{programName}/backup`
+- `POST /admin/api/supervisor/services/{programName}/restore`
+- `GET /admin/api/supervisor/ports/check?host=127.0.0.1&port=9001`
+- `POST /admin/api/supervisor/reread`
+- `POST /admin/api/supervisor/update`
+- `GET /admin/api/supervisor/status?host=127.0.0.1`
 
 统一响应格式：
 
@@ -139,10 +167,22 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 
 ## 示例
 
+登录获取 Token：
+
+```bash
+curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "username": "ops",
+    "password": "secret"
+  }'
+```
+
 新增服务：
 
 ```bash
-curl -X POST http://127.0.0.1:18880/api/supervisor/services \
+curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services \
+  -H 'Authorization: Bearer <access-token>' \
   -H 'Content-Type: application/json' \
   -d '{
     "host": "127.0.0.1",
@@ -163,7 +203,8 @@ curl -X POST http://127.0.0.1:18880/api/supervisor/services \
 修改服务并自动重命名：
 
 ```bash
-curl -X PUT http://127.0.0.1:18880/api/supervisor/services/demo-project_member \
+curl -X PUT http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member \
+  -H 'Authorization: Bearer <access-token>' \
   -H 'Content-Type: application/json' \
   -d '{
     "host": "127.0.0.1",
@@ -184,13 +225,15 @@ curl -X PUT http://127.0.0.1:18880/api/supervisor/services/demo-project_member \
 删除服务：
 
 ```bash
-curl -X DELETE 'http://127.0.0.1:18880/api/supervisor/services/demo-project_member?host=127.0.0.1&deleteBackup=false'
+curl -X DELETE 'http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member?host=127.0.0.1&deleteBackup=false' \
+  -H 'Authorization: Bearer <access-token>'
 ```
 
 备份配置：
 
 ```bash
-curl -X POST http://127.0.0.1:18880/api/supervisor/services/demo-project_member/backup \
+curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member/backup \
+  -H 'Authorization: Bearer <access-token>' \
   -H 'Content-Type: application/json' \
   -d '{"host":"127.0.0.1"}'
 ```
@@ -198,7 +241,8 @@ curl -X POST http://127.0.0.1:18880/api/supervisor/services/demo-project_member/
 还原配置：
 
 ```bash
-curl -X POST http://127.0.0.1:18880/api/supervisor/services/demo-project_member/restore \
+curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member/restore \
+  -H 'Authorization: Bearer <access-token>' \
   -H 'Content-Type: application/json' \
   -d '{"host":"127.0.0.1"}'
 ```
@@ -206,15 +250,18 @@ curl -X POST http://127.0.0.1:18880/api/supervisor/services/demo-project_member/
 检测端口冲突：
 
 ```bash
-curl 'http://127.0.0.1:18880/api/supervisor/ports/check?host=127.0.0.1&port=9001'
+curl 'http://127.0.0.1:18880/admin/api/supervisor/ports/check?host=127.0.0.1&port=9001' \
+  -H 'Authorization: Bearer <access-token>'
 ```
 
 ## 生产安全建议
 
 - 目标主机必须通过配置白名单声明，不允许调用方传入任意目标
+- `JWT_SECRET` 必须使用高强度随机值，禁止直接沿用示例配置
+- MySQL 账号只授予当前业务库的最小权限
 - 严格限制 `sudoers` 和提权代理只允许执行受控命令
 - `ansible` 节点需要最小权限访问 Inventory 与 SSH 凭据
-- 不要把生产 Token、Inventory、SSH 密钥提交到仓库
+- 不要把生产数据库密码、JWT 密钥、Inventory、SSH 密钥提交到仓库
 - 配置目录必须固定在 `/etc/supervisord.d`
 
 ## 验收命令
@@ -230,9 +277,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 接口验证：
 
 ```bash
-curl http://127.0.0.1:18880/api/supervisor/hosts
+curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"ops","password":"secret"}'
 ```
 
 ```bash
-curl 'http://127.0.0.1:18880/api/supervisor/ports/check?host=127.0.0.1&port=9001'
+curl 'http://127.0.0.1:18880/admin/api/supervisor/ports/check?host=127.0.0.1&port=9001' \
+  -H 'Authorization: Bearer <access-token>'
 ```

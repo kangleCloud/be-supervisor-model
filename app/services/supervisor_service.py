@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 from app.core.exceptions import RemoteCommandError, SupervisorCommandError
 from app.core.security import ensure_safe_program_name
@@ -26,7 +27,7 @@ class SupervisorService:
     def __init__(self, host_service: HostService):
         self.host_service = host_service
 
-    def status(self, host: str, program_name: str | None = None) -> list[SupervisorStatus]:
+    def status(self, host: str, program_name: Optional[str] = None) -> list[SupervisorStatus]:
         """查询服务状态。"""
         command = ["supervisorctl", "status"]
         if program_name:
