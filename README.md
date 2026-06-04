@@ -9,7 +9,7 @@
 - 认证接口统一走 `/admin/api/auth/*`
 - Supervisor 管理接口统一走 `/admin/api/supervisor/*`
 - 使用 `Authorization: Bearer <jwt>` 访问受保护接口
-- 登录会话与登录审计落到 MySQL 8
+- 登录令牌与登录审计落到 MySQL 8
 
 ## 技术栈
 
@@ -82,7 +82,7 @@ stdout_logfile=/data/logs/demo/demo-member.log
   - `stdout_logfile_backups=1`
   - `stopasgroup=false`
   - `killasgroup=false`
-- `autoStart` 仅用于控制本次接口执行完成后是否立即启动服务，不会改变模板中的 `autostart=true`
+- `autoStart` 仅用于控制本次新增或修改接口执行完成后是否立即启动服务，不会改变模板中的 `autostart=true`
 
 ## 配置
 
@@ -119,6 +119,13 @@ cp config.example.yaml config.yaml
 python scripts/hash_password.py
 ```
 
+## 业务文档
+
+仓库业务文档统一放在 `docs/` 目录，采用 `docs/NN.主题.md` 的专题文档编号方式。
+
+- 当前基线文档见 [docs/01.业务流程说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/01.业务流程说明.md)
+- 后续每次系统业务修改，都会继续新增 `docs/NN.主题.md` 专题文档
+
 ## 启动方式
 
 ```bash
@@ -137,7 +144,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 ## API 列表
 
 - `POST /admin/api/auth/login`
-- `GET /admin/api/auth/me`
+- `GET /admin/api/auth/profile`
 - `POST /admin/api/auth/logout`
 - `GET /admin/api/supervisor/hosts`
 - `GET /admin/api/supervisor/services?host=127.0.0.1`
