@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 
+TEST_ORIGIN = "http://127.0.0.1:5173"
+
+
 def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[str, object]:
     return {
         "host": host,
@@ -28,6 +31,17 @@ def _login_headers(client) -> dict[str, str]:
     )
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['data']['accessToken']}"}
+
+
+def _assert_cors_headers(response, origin: str = TEST_ORIGIN) -> None:
+    assert response.headers["access-control-allow-origin"] == origin
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["access-control-allow-methods"] == "GET,POST,PUT,DELETE,OPTIONS"
+    assert response.headers["access-control-max-age"] == "3600"
+    assert response.headers["access-control-allow-headers"] == (
+        "Authorization, Content-Type, Accept, X-Requested-With, Cache-Control, Pragma"
+    )
+    assert response.headers["access-control-expose-headers"] == "Authorization"
 
 
 def test_api_requires_jwt(client):
@@ -197,3 +211,60 @@ def test_api_rejects_removed_supervisor_template_fields(client, seed_user):
 
     assert response.status_code == 400
     assert response.json()["code"] == 40000
+
+
+def test_api_preflight_login_returns_cors_headers(client):
+    response = client.options(
+        "/admin/api/auth/login",
+        headers={
+            "Origin": TEST_ORIGIN,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type",
+        },
+    )
+
+    assert response.status_code == 200
+    _assert_cors_headers(response)
+
+
+def test_api_preflight_protected_route_skips_jwt(client):
+    response = client.options(
+        "/admin/api/supervisor/hosts",
+        headers={
+            "Origin": TEST_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Authorization",
+        },
+    )
+
+    assert response.status_code == 200
+    _assert_cors_headers(response)
+
+
+def test_api_unauthorized_response_keeps_cors_headers(client):
+    response = client.get(
+        "/admin/api/supervisor/hosts",
+        headers={
+            "Origin": TEST_ORIGIN,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == 40100
+    _assert_cors_headers(response)
+
+
+def test_api_success_response_keeps_cors_headers(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+    response = client.get(
+        "/admin/api/supervisor/hosts",
+        headers={
+            **headers,
+            "Origin": TEST_ORIGIN,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["code"] == 200
+    _assert_cors_headers(response)

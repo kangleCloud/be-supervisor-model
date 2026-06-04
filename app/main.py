@@ -5,6 +5,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from starlette.responses import Response
 
 from app.api.auth import router as auth_router
 from app.api.supervisor import router as supervisor_router
@@ -16,6 +17,23 @@ from app.core.response import fail
 
 
 LOGGER = logging.getLogger(__name__)
+
+API_PREFIX = "/admin/api"
+CORS_ALLOW_METHODS = "GET,POST,PUT,DELETE,OPTIONS"
+CORS_ALLOW_HEADERS = "Authorization, Content-Type, Accept, X-Requested-With, Cache-Control, Pragma"
+CORS_EXPOSE_HEADERS = "Authorization"
+
+
+def _apply_cors_headers(request: Request, response: Response) -> Response:
+    """为管理 API 统一补齐跨域响应头。"""
+    origin = request.headers.get("origin")
+    response.headers["Access-Control-Allow-Origin"] = origin or "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Access-Control-Allow-Methods"] = CORS_ALLOW_METHODS
+    response.headers["Access-Control-Max-Age"] = "3600"
+    response.headers["Access-Control-Allow-Headers"] = CORS_ALLOW_HEADERS
+    response.headers["Access-Control-Expose-Headers"] = CORS_EXPOSE_HEADERS
+    return response
 
 
 def create_app() -> FastAPI:
@@ -29,6 +47,20 @@ def create_app() -> FastAPI:
         description="面向运维场景的 Supervisor 配置、登录鉴权与进程管理服务。",
         version="0.1.0",
     )
+
+    @app.middleware("http")
+    async def apply_api_cors(request: Request, call_next):
+        if not request.url.path.startswith(API_PREFIX):
+            return await call_next(request)
+
+        # 前端的 Authorization 与 application/json 会触发浏览器预检，不能继续落到鉴权或业务路由。
+        if request.method == "OPTIONS":
+            return _apply_cors_headers(request, Response(status_code=200))
+
+        response = await call_next(request)
+        # 对齐 be-vita：有 Origin 时原样回写，没有 Origin 时回 *，保持前端跨源错误响应可读。
+        return _apply_cors_headers(request, response)
+
     app.include_router(auth_router)
     app.include_router(supervisor_router)
 

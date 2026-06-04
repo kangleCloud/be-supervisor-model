@@ -134,6 +134,7 @@ python3 scripts/import_supervisor_services.py
 
 - 基线业务说明见 [docs/01.业务流程说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/01.业务流程说明.md)
 - 本次主数据化改造见 [docs/02.Supervisor管理表设计与同步流程.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/02.Supervisor管理表设计与同步流程.md)
+- 本次跨域预检修复见 [docs/03.跨域预检与跨源访问说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/03.跨域预检与跨源访问说明.md)
 
 ## 启动方式
 
@@ -154,6 +155,7 @@ pip install -r requirements.txt
 
 - 必须显式传入 `dev` 或 `prod`
 - `./scripts/run.sh` 不传参数会直接报错
+- 脚本会按自身位置定位仓库根目录，可在仓库根目录或 `scripts/` 目录执行
 - 如需使用自定义环境文件，可手工执行 `APP_ENV_FILE=/absolute/path/to/custom.env python3.12 -m uvicorn app.main:app`
 
 ## API 列表
@@ -165,6 +167,13 @@ pip install -r requirements.txt
 - `GET /admin/api/supervisor/services?host=127.0.0.1`
 - `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`
 - `POST /admin/api/supervisor/services`
+
+## 跨域访问说明
+
+- 所有 `/admin/api/*` 接口统一由服务端补齐 CORS 响应头
+- 浏览器发送的 `OPTIONS` 预检请求会直接返回 `200`，不做 JWT 鉴权
+- 当前策略对齐 `be-vita`：有 `Origin` 时原样回写，没有 `Origin` 时返回 `*`
+- 跨域放行只解决浏览器可达性，不影响原有 `Authorization: Bearer <jwt>` 鉴权规则
 
 统一响应格式：
 

@@ -11,6 +11,7 @@ import app.core.config as config_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 
 
 def _prepare_repo_files(tmp_path: Path) -> Path:
@@ -169,12 +170,20 @@ def test_run_script_requires_env_argument():
     assert "用法: ./scripts/run.sh <dev|prod>" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("script_cwd", "command_prefix"),
+    [
+        (REPO_ROOT, ["bash", "scripts/run.sh"]),
+        (SCRIPTS_DIR, ["bash", "run.sh"]),
+    ],
+)
 @pytest.mark.parametrize("app_env", ["dev", "prod"])
-def test_run_script_passes_selected_env_to_python(tmp_path, app_env):
+def test_run_script_passes_selected_env_to_python(tmp_path, script_cwd, command_prefix, app_env):
     stub_dir = tmp_path / "bin"
     stub_dir.mkdir()
     capture_path = tmp_path / "captured_app_env.txt"
     args_path = tmp_path / "captured_args.txt"
+    pwd_path = tmp_path / "captured_pwd.txt"
     python_stub = stub_dir / "python3.12"
     python_stub.write_text(
         "\n".join(
@@ -183,6 +192,7 @@ def test_run_script_passes_selected_env_to_python(tmp_path, app_env):
                 "set -euo pipefail",
                 "printf '%s' \"${APP_ENV:-}\" > \"$RUN_SH_CAPTURE_FILE\"",
                 "printf '%s\\n' \"$@\" > \"$RUN_SH_ARGS_FILE\"",
+                "pwd > \"$RUN_SH_PWD_FILE\"",
             ]
         ),
         encoding="utf-8",
@@ -193,10 +203,11 @@ def test_run_script_passes_selected_env_to_python(tmp_path, app_env):
     env["PATH"] = f"{stub_dir}:{env['PATH']}"
     env["RUN_SH_CAPTURE_FILE"] = str(capture_path)
     env["RUN_SH_ARGS_FILE"] = str(args_path)
+    env["RUN_SH_PWD_FILE"] = str(pwd_path)
 
     result = subprocess.run(
-        ["bash", "scripts/run.sh", app_env],
-        cwd=REPO_ROOT,
+        [*command_prefix, app_env],
+        cwd=script_cwd,
         env=env,
         capture_output=True,
         text=True,
@@ -206,3 +217,4 @@ def test_run_script_passes_selected_env_to_python(tmp_path, app_env):
     assert result.returncode == 0
     assert capture_path.read_text(encoding="utf-8") == app_env
     assert args_path.read_text(encoding="utf-8").strip() == "-"
+    assert pwd_path.read_text(encoding="utf-8").strip() == str(REPO_ROOT)
