@@ -10,7 +10,7 @@ from app.core.database import get_connection
 from app.core.exceptions import ParamError, UnauthorizedError
 from app.core.jwt_service import create_access_token, decode_access_token
 from app.core.passwords import verify_password
-from app.services.session_service import SessionService, to_db_datetime
+from app.services.token_service import TokenService, to_db_datetime
 from app.services.user_service import UserRecord, UserService
 
 
@@ -23,7 +23,7 @@ class AuthenticatedUser:
     display_name: str
     roles: tuple[str, ...]
     permissions: tuple[str, ...]
-    session_id: int
+    token_id: int
     token_jti: str
 
     def to_auth_profile(self) -> dict[str, object]:
@@ -41,10 +41,10 @@ class AuthService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.user_service = UserService(settings)
-        self.session_service = SessionService(settings)
+        self.token_service = TokenService(settings)
 
     def login(self, username: str, password: str, client_ip: str, user_agent: str) -> dict[str, object]:
-        """校验账号密码，签发 JWT，并写入会话与审计日志。"""
+        """校验账号密码，签发 JWT，并写入令牌与审计日志。"""
         normalized_username = (username or "").strip()
         normalized_password = (password or "").strip()
         if not normalized_username or not normalized_password:
@@ -54,7 +54,7 @@ class AuthService:
         if user is None or not verify_password(normalized_password, user.password):
             self._write_login_log(
                 user_id=user.id if user else None,
-                session_id=None,
+                token_id=None,
                 user_name=normalized_username,
                 ip_address=client_ip,
                 user_agent=user_agent,
@@ -67,7 +67,7 @@ class AuthService:
         if user.status != 1:
             self._write_login_log(
                 user_id=user.id,
-                session_id=None,
+                token_id=None,
                 user_name=user.user_name,
                 ip_address=client_ip,
                 user_agent=user_agent,
@@ -83,7 +83,7 @@ class AuthService:
             self.settings.auth.jwt_secret,
             self.settings.auth.access_token_expire_minutes,
         )
-        session_id = self.session_service.create_session(
+        token_id = self.token_service.create_token(
             user_id=user.id,
             user_name=user.user_name,
             token=token,
@@ -96,7 +96,7 @@ class AuthService:
         self.user_service.update_login_info(user.id, user.user_name, to_db_datetime(issued_at), client_ip)
         self._write_login_log(
             user_id=user.id,
-            session_id=session_id,
+            token_id=token_id,
             user_name=user.user_name,
             ip_address=client_ip,
             user_agent=user_agent,
@@ -112,7 +112,7 @@ class AuthService:
         }
 
     def authenticate_access_token(self, token: str) -> AuthenticatedUser:
-        """校验 JWT 与会话表状态，并返回当前用户上下文。"""
+        """校验 JWT 与令牌表状态，并返回当前用户上下文。"""
         if not token:
             raise UnauthorizedError("缺少登录凭证")
 
@@ -130,10 +130,10 @@ class AuthService:
         except (KeyError, TypeError, ValueError) as exc:
             raise UnauthorizedError("登录凭证无效") from exc
 
-        session = self.session_service.get_active_session(user_id, token_jti)
-        if session is None:
-            raise UnauthorizedError("登录会话已失效")
-        if session.token_digest != self.session_service.build_token_digest(token):
+        token_record = self.token_service.get_active_token(user_id, token_jti)
+        if token_record is None:
+            raise UnauthorizedError("登录令牌已失效")
+        if token_record.token_digest != self.token_service.build_token_digest(token):
             raise UnauthorizedError("登录凭证无效")
 
         user = self.user_service.get_by_id(user_id)
@@ -141,16 +141,16 @@ class AuthService:
             raise UnauthorizedError("用户不存在")
         if user.status != 1:
             raise UnauthorizedError("账号已禁用")
-        return self._build_authenticated_user(user, session.id, username= user.user_name, token_jti=token_jti)
+        return self._build_authenticated_user(user, token_record.id, username=user.user_name, token_jti=token_jti)
 
     def logout(self, current_user: AuthenticatedUser) -> None:
-        """注销当前会话。"""
-        self.session_service.revoke_session(current_user.session_id, current_user.user_id, current_user.username)
+        """注销当前令牌。"""
+        self.token_service.revoke_token(current_user.token_id, current_user.user_id, current_user.username)
 
     def _write_login_log(
         self,
         user_id: int | None,
-        session_id: int | None,
+        token_id: int | None,
         user_name: str,
         ip_address: str,
         user_agent: str,
@@ -164,13 +164,13 @@ class AuthService:
                 cursor.execute(
                     """
                     INSERT INTO sys_login_log(
-                        user_id, session_id, user_name, ipaddr, login_location, browser, os, status, msg,
+                        user_id, token_id, user_name, ipaddr, login_location, browser, os, status, msg,
                         token_jti, login_time, create_by_id, create_by, update_by_id, update_by, remark
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user_id,
-                        session_id,
+                        token_id,
                         user_name,
                         ip_address,
                         "内网",
@@ -190,14 +190,14 @@ class AuthService:
             connection.commit()
 
     @staticmethod
-    def _build_authenticated_user(user: UserRecord, session_id: int, username: str, token_jti: str) -> AuthenticatedUser:
+    def _build_authenticated_user(user: UserRecord, token_id: int, username: str, token_jti: str) -> AuthenticatedUser:
         return AuthenticatedUser(
             user_id=user.id,
             username=username,
             display_name=user.display_name,
             roles=tuple(user.roles),
             permissions=tuple(user.permissions),
-            session_id=session_id,
+            token_id=token_id,
             token_jti=token_jti,
         )
 

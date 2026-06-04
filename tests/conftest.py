@@ -163,14 +163,14 @@ class FakeMySQLConnection:
 
 
 class FakeMySQLServer:
-    """使用内存字典模拟 MySQL 表数据，便于测试 JWT 与会话逻辑。"""
+    """使用内存字典模拟 MySQL 表数据，便于测试 JWT 与令牌逻辑。"""
 
     def __init__(self):
         self.databases: set[str] = set()
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.auto_increment: dict[str, int] = {
             "sys_login_log": 1,
-            "sys_login_session": 1,
+            "sys_login_token": 1,
         }
 
     def connect_server(self):
@@ -229,6 +229,11 @@ class FakeMySQLServer:
             self.tables.setdefault(table_name, [])
             return 1
 
+        if normalized == "SHOW TABLES LIKE %s":
+            table_name = str(params[0])
+            cursor.results = [{"table_name": table_name}] if table_name in self.tables else []
+            return len(cursor.results)
+
         if normalized == "SELECT version FROM sys_schema_migration":
             cursor.results = [{"version": row["version"]} for row in self.tables.setdefault("sys_schema_migration", [])]
             return len(cursor.results)
@@ -268,11 +273,11 @@ class FakeMySQLServer:
                     return 1
             return 0
 
-        if normalized.startswith("INSERT INTO sys_login_session("):
-            session_id = self.auto_increment["sys_login_session"]
-            self.auto_increment["sys_login_session"] += 1
+        if normalized.startswith("INSERT INTO sys_login_token("):
+            token_id = self.auto_increment["sys_login_token"]
+            self.auto_increment["sys_login_token"] += 1
             row = {
-                "id": session_id,
+                "id": token_id,
                 "tenant_id": None,
                 "user_id": int(params[0]),
                 "user_name": str(params[1]),
@@ -291,16 +296,16 @@ class FakeMySQLServer:
                 "is_deleted": 0,
                 "version": 0,
             }
-            self.tables.setdefault("sys_login_session", []).append(row)
-            cursor.lastrowid = session_id
+            self.tables.setdefault("sys_login_token", []).append(row)
+            cursor.lastrowid = token_id
             return 1
 
-        if "FROM sys_login_session WHERE user_id = %s AND token_jti = %s AND is_deleted = 0 AND revoked_time IS NULL LIMIT 1" in normalized:
+        if "FROM sys_login_token WHERE user_id = %s AND token_jti = %s AND is_deleted = 0 AND revoked_time IS NULL LIMIT 1" in normalized:
             user_id, token_jti = int(params[0]), str(params[1])
             row = next(
                 (
                     item
-                    for item in self.tables.get("sys_login_session", [])
+                    for item in self.tables.get("sys_login_token", [])
                     if int(item["user_id"]) == user_id
                     and item["token_jti"] == token_jti
                     and item["is_deleted"] == 0
@@ -311,10 +316,10 @@ class FakeMySQLServer:
             cursor.results = [row] if row else []
             return len(cursor.results)
 
-        if normalized.startswith("UPDATE sys_login_session SET revoked_time = %s"):
-            revoked_time, update_by_id, update_by, session_id = params
-            for item in self.tables.get("sys_login_session", []):
-                if int(item["id"]) == int(session_id) and item["revoked_time"] is None:
+        if normalized.startswith("UPDATE sys_login_token SET revoked_time = %s"):
+            revoked_time, update_by_id, update_by, token_id = params
+            for item in self.tables.get("sys_login_token", []):
+                if int(item["id"]) == int(token_id) and item["revoked_time"] is None:
                     item["revoked_time"] = revoked_time
                     item["update_by_id"] = update_by_id
                     item["update_by"] = update_by
@@ -329,7 +334,7 @@ class FakeMySQLServer:
                 {
                     "id": log_id,
                     "user_id": params[0],
-                    "session_id": params[1],
+                    "token_id": params[1],
                     "user_name": params[2],
                     "ipaddr": params[3],
                     "login_location": params[4],

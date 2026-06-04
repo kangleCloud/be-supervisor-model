@@ -16,7 +16,7 @@ def _login(client, username: str = "ops", password: str = "secret"):
     )
 
 
-def test_auth_login_and_me_success(client, seed_user, fake_mysql):
+def test_auth_login_and_profile_success(client, seed_user, fake_mysql):
     seed_user(is_super_admin=1, nick_name="超级运维")
 
     login_response = _login(client)
@@ -26,17 +26,17 @@ def test_auth_login_and_me_success(client, seed_user, fake_mysql):
     assert payload["tokenType"] == "Bearer"
     assert payload["user"]["displayName"] == "超级运维"
     assert payload["user"]["roles"] == ["SUPER_ADMIN"]
-    assert len(fake_mysql.tables["sys_login_session"]) == 1
+    assert len(fake_mysql.tables["sys_login_token"]) == 1
     assert len(fake_mysql.tables["sys_login_log"]) == 1
     assert fake_mysql.tables["sys_login_log"][0]["status"] == "0"
 
-    me_response = client.get(
-        "/admin/api/auth/me",
+    profile_response = client.get(
+        "/admin/api/auth/profile",
         headers={"Authorization": f"Bearer {payload['accessToken']}"},
     )
 
-    assert me_response.status_code == 200
-    assert me_response.json()["data"]["permissions"] == ["supervisor:manage"]
+    assert profile_response.status_code == 200
+    assert profile_response.json()["data"]["permissions"] == ["supervisor:manage"]
 
 
 def test_auth_rejects_invalid_password(client, seed_user, fake_mysql):
@@ -68,7 +68,7 @@ def test_auth_rejects_invalid_signature(client, seed_user):
     broken_token = f"{access_token}broken"
 
     response = client.get(
-        "/admin/api/auth/me",
+        "/admin/api/auth/profile",
         headers={"Authorization": f"Bearer {broken_token}"},
     )
 
@@ -90,7 +90,7 @@ def test_auth_rejects_expired_token(client, seed_user, settings):
     )
 
     response = client.get(
-        "/admin/api/auth/me",
+        "/admin/api/auth/profile",
         headers={"Authorization": f"Bearer {expired_token}"},
     )
 
@@ -98,7 +98,7 @@ def test_auth_rejects_expired_token(client, seed_user, settings):
     assert response.json()["msg"] == "登录状态已过期"
 
 
-def test_auth_logout_revokes_session(client, seed_user):
+def test_auth_logout_revokes_token(client, seed_user):
     seed_user()
     login_response = _login(client)
     access_token = login_response.json()["data"]["accessToken"]
@@ -107,6 +107,6 @@ def test_auth_logout_revokes_session(client, seed_user):
     logout_response = client.post("/admin/api/auth/logout", headers=headers)
     assert logout_response.status_code == 200
 
-    me_response = client.get("/admin/api/auth/me", headers=headers)
-    assert me_response.status_code == 401
-    assert me_response.json()["msg"] == "登录会话已失效"
+    profile_response = client.get("/admin/api/auth/profile", headers=headers)
+    assert profile_response.status_code == 401
+    assert profile_response.json()["msg"] == "登录令牌已失效"

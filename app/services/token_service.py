@@ -1,4 +1,4 @@
-"""登录会话服务。"""
+"""登录令牌服务。"""
 from __future__ import annotations
 
 import hashlib
@@ -10,8 +10,8 @@ from app.core.database import get_connection
 
 
 @dataclass(frozen=True)
-class LoginSessionRecord:
-    """活动登录会话。"""
+class LoginTokenRecord:
+    """活动登录令牌。"""
 
     id: int
     user_id: int
@@ -21,13 +21,13 @@ class LoginSessionRecord:
     revoked_time: datetime | None
 
 
-class SessionService:
-    """JWT 会话写库与注销服务。"""
+class TokenService:
+    """JWT 令牌写库与注销服务。"""
 
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def create_session(
+    def create_token(
         self,
         user_id: int,
         user_name: str,
@@ -38,13 +38,13 @@ class SessionService:
         issued_at: datetime,
         expires_at: datetime,
     ) -> int:
-        """写入有效登录会话。"""
+        """写入有效登录令牌。"""
         token_digest = self.build_token_digest(token)
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO sys_login_session(
+                    INSERT INTO sys_login_token(
                         user_id, user_name, token_jti, token_digest, login_ip, user_agent,
                         issued_at, expires_at, create_by_id, create_by, update_by_id, update_by, remark
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -62,21 +62,21 @@ class SessionService:
                         user_name,
                         user_id,
                         user_name,
-                        "JWT登录会话",
+                        "JWT登录令牌",
                     ),
                 )
-                session_id = int(cursor.lastrowid)
+                token_id = int(cursor.lastrowid)
             connection.commit()
-        return session_id
+        return token_id
 
-    def get_active_session(self, user_id: int, token_jti: str) -> LoginSessionRecord | None:
-        """按 user_id 与 jti 查询未注销会话。"""
+    def get_active_token(self, user_id: int, token_jti: str) -> LoginTokenRecord | None:
+        """按 user_id 与 jti 查询未注销令牌。"""
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     SELECT id, user_id, user_name, token_jti, token_digest, revoked_time
-                    FROM sys_login_session
+                    FROM sys_login_token
                     WHERE user_id = %s
                       AND token_jti = %s
                       AND is_deleted = 0
@@ -88,7 +88,7 @@ class SessionService:
                 row = cursor.fetchone()
         if row is None:
             return None
-        return LoginSessionRecord(
+        return LoginTokenRecord(
             id=int(row["id"]),
             user_id=int(row["user_id"]),
             user_name=str(row["user_name"]),
@@ -97,14 +97,14 @@ class SessionService:
             revoked_time=coerce_datetime(row.get("revoked_time")),
         )
 
-    def revoke_session(self, session_id: int, user_id: int, username: str) -> None:
-        """注销指定会话，保证后续请求立即失效。"""
+    def revoke_token(self, token_id: int, user_id: int, username: str) -> None:
+        """注销指定令牌，保证后续请求立即失效。"""
         revoked_time = to_db_datetime(datetime.now(timezone.utc))
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE sys_login_session
+                    UPDATE sys_login_token
                     SET revoked_time = %s,
                         update_time = CURRENT_TIMESTAMP,
                         update_by_id = %s,
@@ -112,7 +112,7 @@ class SessionService:
                         version = version + 1
                     WHERE id = %s AND revoked_time IS NULL
                     """,
-                    (revoked_time, user_id, username, session_id),
+                    (revoked_time, user_id, username, token_id),
                 )
             connection.commit()
 

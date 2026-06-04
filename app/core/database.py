@@ -16,6 +16,8 @@ from app.core.config import Settings
 MIGRATION_FILE_PATTERN = re.compile(r"^(?P<version>\d+)_.*\.sql$")
 DATABASE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "database" / "migrations"
+AUTH_BASELINE_VERSION = 1
+REQUIRED_AUTH_TABLES = ("sys_user", "sys_login_log", "sys_login_token")
 
 
 def _connect(settings: Settings, *, include_database: bool) -> Connection:
@@ -75,8 +77,9 @@ def initialize_database(settings: Settings) -> None:
     try:
         with database_connection.cursor() as cursor:
             _ensure_migration_table(cursor)
+            migrations = _iter_migrations()
             applied_versions = _load_applied_versions(cursor)
-            for version, migration_path in _iter_migrations():
+            for version, migration_path in migrations:
                 if version in applied_versions:
                     continue
                 _execute_script(cursor, migration_path.read_text(encoding="utf-8"))
@@ -84,6 +87,8 @@ def initialize_database(settings: Settings) -> None:
                     "INSERT INTO sys_schema_migration(version, name) VALUES (%s, %s)",
                     (version, migration_path.name),
                 )
+            # 历史版本记录只能说明“迁移曾尝试执行”，不能说明关键表一定真实存在。
+            _ensure_required_auth_tables(cursor, migrations)
         database_connection.commit()
     finally:
         database_connection.close()
@@ -93,10 +98,11 @@ def _ensure_migration_table(cursor: Cursor) -> None:
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS sys_schema_migration (
-            version INT NOT NULL PRIMARY KEY,
-            name VARCHAR(255) NOT NULL,
-            applied_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            version INT NOT NULL PRIMARY KEY COMMENT '迁移版本号',
+            name VARCHAR(255) NOT NULL COMMENT '迁移文件名',
+            applied_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '执行时间'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        COMMENT='数据库迁移记录表'
         """
     )
 
@@ -119,6 +125,44 @@ def _iter_migrations() -> list[tuple[int, Path]]:
 def _execute_script(cursor: Cursor, script: str) -> None:
     for statement in _split_sql_statements(script):
         cursor.execute(statement)
+
+
+def _ensure_required_auth_tables(cursor: Cursor, migrations: list[tuple[int, Path]]) -> None:
+    """校验认证基线表存在，缺表时重放基线 DDL 做补建。"""
+    missing_tables = _find_missing_tables(cursor, REQUIRED_AUTH_TABLES)
+    if not missing_tables:
+        return
+
+    baseline_path = _find_migration_path(migrations, AUTH_BASELINE_VERSION)
+    if baseline_path is None:
+        raise RuntimeError("缺少认证基线迁移文件，无法自动补建表")
+
+    _execute_script(cursor, baseline_path.read_text(encoding="utf-8"))
+    missing_tables = _find_missing_tables(cursor, REQUIRED_AUTH_TABLES)
+    if missing_tables:
+        missing_text = ", ".join(missing_tables)
+        raise RuntimeError(f"关键认证表创建失败: {missing_text}")
+
+
+def _find_missing_tables(cursor: Cursor, table_names: tuple[str, ...]) -> list[str]:
+    """逐个检查关键表是否存在，避免只依赖迁移版本号。"""
+    missing_tables: list[str] = []
+    for table_name in table_names:
+        if not _table_exists(cursor, table_name):
+            missing_tables.append(table_name)
+    return missing_tables
+
+
+def _table_exists(cursor: Cursor, table_name: str) -> bool:
+    cursor.execute("SHOW TABLES LIKE %s", (table_name,))
+    return cursor.fetchone() is not None
+
+
+def _find_migration_path(migrations: list[tuple[int, Path]], version: int) -> Path | None:
+    for migration_version, migration_path in migrations:
+        if migration_version == version:
+            return migration_path
+    return None
 
 
 def _split_sql_statements(script: str) -> list[str]:
