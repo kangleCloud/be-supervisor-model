@@ -111,13 +111,16 @@ cp config.example.yaml config.yaml
 
 - 服务启动时会自动创建目标数据库（若不存在）
 - 会自动执行 `app/database/migrations/*.sql` 中的表结构迁移
-- 账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
+- 会自动初始化一条超级管理员账号：`admin / Admin@123456`
+- 其他账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
 
 密码哈希可以使用脚本生成：
 
 ```bash
 python scripts/hash_password.py
 ```
+
+生成新哈希后，可以手工更新 `sys_user.password` 来重置默认超级管理员密码。
 
 ## 业务文档
 
@@ -180,8 +183,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{
-    "username": "ops",
-    "password": "secret"
+    "username": "admin",
+    "password": "Admin@123456"
   }'
 ```
 
@@ -286,7 +289,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 ```bash
 curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"ops","password":"secret"}'
+  -d '{"username":"admin","password":"Admin@123456"}'
 ```
 
 ```bash

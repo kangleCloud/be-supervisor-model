@@ -39,6 +39,15 @@ def test_auth_login_and_profile_success(client, seed_user, fake_mysql):
     assert profile_response.json()["data"]["permissions"] == ["supervisor:manage"]
 
 
+def test_default_super_admin_can_login(client):
+    response = _login(client, username="admin", password="Admin@123456")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["user"]["username"] == "admin"
+    assert payload["user"]["roles"] == ["SUPER_ADMIN"]
+
+
 def test_auth_rejects_invalid_password(client, seed_user, fake_mysql):
     seed_user()
 

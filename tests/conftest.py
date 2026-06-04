@@ -184,11 +184,14 @@ class FakeMySQLServer:
         user_name: str,
         password: str,
         *,
-        user_id: int = 1,
+        user_id: int | None = None,
         nick_name: str | None = None,
         status: int = 1,
         is_super_admin: int = 0,
     ) -> None:
+        if user_id is None:
+            # 默认超级管理员会在迁移时占用首个 ID，测试辅助按当前表数据自动顺延。
+            user_id = max((int(item["id"]) for item in self.tables.get("sys_user", [])), default=0) + 1
         self.tables.setdefault("sys_user", [])
         self.tables["sys_user"].append(
             {
@@ -260,6 +263,44 @@ class FakeMySQLServer:
             )
             cursor.results = [row] if row else []
             return len(cursor.results)
+
+        if normalized.startswith("INSERT INTO sys_user("):
+            active_admin = next(
+                (
+                    item
+                    for item in self.tables.get("sys_user", [])
+                    if item["user_name"] == "admin" and item["is_deleted"] == 0
+                ),
+                None,
+            )
+            if active_admin is not None:
+                return 0
+
+            next_user_id = max((int(item["id"]) for item in self.tables.get("sys_user", [])), default=0) + 1
+            self.tables.setdefault("sys_user", []).append(
+                {
+                    "id": next_user_id,
+                    "tenant_id": 0,
+                    "user_name": "admin",
+                    "nick_name": "超级管理员",
+                    "password": "$2b$12$27nxsNqi/PQ8Yo3Py.cs/uWDVi.e1z7lQQhMbmm5AIEjhNRWodN7K",
+                    "status": 1,
+                    "is_super_admin": 1,
+                    "login_time": None,
+                    "login_address": None,
+                    "pwd_update_date": "2026-06-04 00:00:00",
+                    "create_time": "2026-06-04 00:00:00",
+                    "update_time": "2026-06-04 00:00:00",
+                    "is_deleted": 0,
+                    "create_by_id": 0,
+                    "create_by": "system",
+                    "update_by_id": 0,
+                    "update_by": "system",
+                    "version": 0,
+                    "remark": "系统初始化超级管理员，请尽快重置默认密码",
+                }
+            )
+            return 1
 
         if normalized.startswith("UPDATE sys_user SET login_time = %s"):
             login_time, login_address, update_by_id, update_by, user_id = params
@@ -445,7 +486,7 @@ def seed_user(fake_mysql):
         user_name: str = "ops",
         password: str = "secret",
         *,
-        user_id: int = 1,
+        user_id: int | None = None,
         nick_name: str | None = "运维用户",
         status: int = 1,
         is_super_admin: int = 0,

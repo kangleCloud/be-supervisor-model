@@ -14,8 +14,18 @@ def test_database_initialization_is_idempotent(settings, fake_mysql):
     assert "sys_user" in fake_mysql.tables
     assert "sys_login_log" in fake_mysql.tables
     assert "sys_login_token" in fake_mysql.tables
-    assert len(fake_mysql.tables["sys_schema_migration"]) == 1
-    assert fake_mysql.tables["sys_schema_migration"][0]["version"] == 1
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2]
+
+
+def test_database_bootstraps_single_super_admin(settings, fake_mysql):
+    initialize_database(settings)
+    initialize_database(settings)
+
+    admin_users = [row for row in fake_mysql.tables["sys_user"] if row["user_name"] == "admin" and row["is_deleted"] == 0]
+
+    assert len(admin_users) == 1
+    assert admin_users[0]["is_super_admin"] == 1
+    assert admin_users[0]["status"] == 1
 
 
 def test_database_recreates_missing_auth_tables(settings, fake_mysql):
@@ -27,7 +37,7 @@ def test_database_recreates_missing_auth_tables(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_login_token" in fake_mysql.tables
-    assert len(fake_mysql.tables["sys_schema_migration"]) == 1
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2]
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):
@@ -58,3 +68,14 @@ def test_auth_migration_sql_contains_token_comments():
     assert "`token_id` BIGINT DEFAULT NULL COMMENT '登录令牌ID'" in migration_sql
     assert "`user_name` VARCHAR(50) NOT NULL COMMENT '用户名'" in migration_sql
     assert "COMMENT='JWT登录令牌表'" in migration_sql
+
+
+def test_super_admin_seed_sql_exists():
+    """默认超级管理员应通过独立迁移落库，覆盖已执行过基线建表的数据库。"""
+    migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "002_seed_super_admin.sql"
+    migration_sql = migration_path.read_text(encoding="utf-8")
+
+    assert "INSERT INTO sys_user(" in migration_sql
+    assert "'admin'" in migration_sql
+    assert "'超级管理员'" in migration_sql
+    assert "'系统初始化超级管理员，请尽快重置默认密码'" in migration_sql
