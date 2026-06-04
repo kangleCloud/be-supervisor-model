@@ -1,7 +1,7 @@
 """Supervisor 命令封装。"""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Optional
 
 from app.core.exceptions import RemoteCommandError, SupervisorCommandError
@@ -18,7 +18,11 @@ class SupervisorStatus:
     raw: str
 
     def to_dict(self) -> dict[str, str]:
-        return asdict(self)
+        return {
+            "programName": self.program_name,
+            "state": self.state,
+            "raw": self.raw,
+        }
 
 
 class SupervisorService:

@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.schemas.supervisor import ServiceUpsertRequest
+from app.schemas.supervisor import ServiceCreateRequest
 from app.services.template_service import TemplateService
 
 
 def test_template_render_and_parse(settings):
     service = TemplateService(settings)
-    payload = ServiceUpsertRequest(
+    payload = ServiceCreateRequest(
         host="127.0.0.1",
         jobName="test-agent_be-suda",
         moduleName="sjfy-admin",
@@ -30,10 +30,13 @@ def test_template_render_and_parse(settings):
     assert rendered.config_name == "test-agent_be-suda_sjfy-admin.ini"
     assert "[program:test-agent_be-suda_sjfy-admin]" in rendered.content
     assert parsed.port == 9001
+    assert parsed.job_name == "test-agent_be-suda"
+    assert parsed.module_name == "sjfy-admin"
     assert parsed.active == "prod"
     assert parsed.jar_name == "sjfy-admin.jar"
     assert parsed.xms == "128m"
     assert parsed.xmx == "256m"
+    assert parsed.run_user == "root"
     assert "autostart=true" in rendered.content
     assert "startsecs=10" in rendered.content
     assert "autorestart=true" in rendered.content

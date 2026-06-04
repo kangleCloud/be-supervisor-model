@@ -1,15 +1,13 @@
 # be-supervisor-model
 
-`be-supervisor-model` 是一个基于 FastAPI 的运维管理服务，用于集中管理目标主机上的 Supervisor 配置文件和进程状态。
+`be-supervisor-model` 是一个基于 FastAPI 的运维管理服务，用于统一管理目标主机上的 Supervisor 配置。
 
-它面向运维后台或后续前端管理系统，提供主机查询、服务配置新增/修改/删除、备份还原、端口冲突检测，以及 `supervisorctl` 常用命令的 REST API。
+当前版本包含两类能力：
 
-当前版本已经内置轻量登录鉴权：
+- 登录鉴权：登录、查询当前用户、退出登录
+- Supervisor 管理：查询主机、查询纳管服务、查询服务详情、新增服务
 
-- 认证接口统一走 `/admin/api/auth/*`
-- Supervisor 管理接口统一走 `/admin/api/supervisor/*`
-- 使用 `Authorization: Bearer <jwt>` 访问受保护接口
-- 登录令牌与登录审计落到 MySQL 8
+Supervisor 配置主数据落在 MySQL 8 的 `sys_supervisor_service` 表中；远端 `/etc/supervisord.d/*.ini` 是实际生效结果；运行状态实时来自 `supervisorctl status`。
 
 ## 技术栈
 
@@ -46,26 +44,6 @@
 
 模板文件位于 [app/templates/supervisor_program.ini.j2](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/app/templates/supervisor_program.ini.j2)。
 
-默认渲染结果：
-
-```ini
-[program:demo_member]
-command=/usr/local/jdk17/bin/java -jar -Xms128m -Xmx128m -Dspring.profiles.active=prod -Dserver.port=9001 /data/content/demo/member/member.jar
-directory=/data/content/demo/member
-autostart=true
-startsecs=10
-autorestart=true
-startretries=3
-user=root
-priority=999
-redirect_stderr=true
-stdout_logfile_maxbytes=1GB
-stdout_logfile_backups=1
-stopasgroup=false
-killasgroup=false
-stdout_logfile=/data/logs/demo/demo-member.log
-```
-
 默认规则：
 
 - `programName = {jobName}_{moduleName}`
@@ -82,14 +60,17 @@ stdout_logfile=/data/logs/demo/demo-member.log
   - `stdout_logfile_backups=1`
   - `stopasgroup=false`
   - `killasgroup=false`
-- `autoStart` 仅用于控制本次新增或修改接口执行完成后是否立即启动服务，不会改变模板中的 `autostart=true`
 
 ## 配置
 
-复制示例配置：
+通用环境变量示例见 [.env.example](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/.env.example)，当前项目实际使用：
+
+- `.env.dev`：开发环境变量
+- `.env.prod`：生产环境变量
+
+复制 YAML 示例配置：
 
 ```bash
-cp .env.example .env
 cp config.example.yaml config.yaml
 ```
 
@@ -104,6 +85,21 @@ cp config.example.yaml config.yaml
 - `COMMAND_TIMEOUT_SECONDS`
 - `EXECUTOR_TYPE`
 - `ANSIBLE_INVENTORY_PATH`
+- `APP_ENV` / `APP_ENV_FILE`
+
+环境变量加载优先级：
+
+- 进程显式环境变量
+- `.env.dev` / `.env.prod`
+- `config.yaml`
+- 代码默认值
+
+环境文件选择规则：
+
+- `APP_ENV_FILE` 优先级最高，必须传绝对路径
+- 未设置 `APP_ENV_FILE` 时，`APP_ENV=dev` 加载 `.env.dev`
+- 未设置 `APP_ENV_FILE` 时，`APP_ENV=prod` 加载 `.env.prod`
+- 未设置 `APP_ENV` 时，保持旧行为，只读取进程环境变量和 `config.yaml`
 
 主机列表示例见 [config.example.yaml](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/config.example.yaml:1)。
 
@@ -117,17 +113,27 @@ cp config.example.yaml config.yaml
 密码哈希可以使用脚本生成：
 
 ```bash
-python scripts/hash_password.py
+python3 scripts/hash_password.py
 ```
 
-生成新哈希后，可以手工更新 `sys_user.password` 来重置默认超级管理员密码。
+## 导入现网配置
+
+现网已有 Supervisor 配置时，需要先执行一次导入脚本，再使用“库为主”的服务列表和详情接口：
+
+```bash
+python3 scripts/import_supervisor_services.py
+```
+
+导入规则：
+
+- 只导入 `*.ini`
+- 不导入 `.bak` 和归档备份
+- 只有能完整反解 `jobName/moduleName/javaPath/active/port/jarName/xms/xmx/user` 的配置才会入库
 
 ## 业务文档
 
-仓库业务文档统一放在 `docs/` 目录，采用 `docs/NN.主题.md` 的专题文档编号方式。
-
-- 当前基线文档见 [docs/01.业务流程说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/01.业务流程说明.md)
-- 后续每次系统业务修改，都会继续新增 `docs/NN.主题.md` 专题文档
+- 基线业务说明见 [docs/01.业务流程说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/01.业务流程说明.md)
+- 本次主数据化改造见 [docs/02.Supervisor管理表设计与同步流程.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/02.Supervisor管理表设计与同步流程.md)
 
 ## 启动方式
 
@@ -135,14 +141,20 @@ python scripts/hash_password.py
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 18880
+./scripts/run.sh dev
 ```
 
-也可以使用脚本：
+生产环境启动：
 
 ```bash
-./scripts/run.sh
+./scripts/run.sh prod
 ```
+
+脚本规则：
+
+- 必须显式传入 `dev` 或 `prod`
+- `./scripts/run.sh` 不传参数会直接报错
+- 如需使用自定义环境文件，可手工执行 `APP_ENV_FILE=/absolute/path/to/custom.env python3.12 -m uvicorn app.main:app`
 
 ## API 列表
 
@@ -153,17 +165,6 @@ uvicorn app.main:app --host 0.0.0.0 --port 18880
 - `GET /admin/api/supervisor/services?host=127.0.0.1`
 - `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`
 - `POST /admin/api/supervisor/services`
-- `PUT /admin/api/supervisor/services/{programName}`
-- `DELETE /admin/api/supervisor/services/{programName}?host=127.0.0.1&deleteBackup=false`
-- `POST /admin/api/supervisor/services/{programName}/start`
-- `POST /admin/api/supervisor/services/{programName}/stop`
-- `POST /admin/api/supervisor/services/{programName}/restart`
-- `POST /admin/api/supervisor/services/{programName}/backup`
-- `POST /admin/api/supervisor/services/{programName}/restore`
-- `GET /admin/api/supervisor/ports/check?host=127.0.0.1&port=9001`
-- `POST /admin/api/supervisor/reread`
-- `POST /admin/api/supervisor/update`
-- `GET /admin/api/supervisor/status?host=127.0.0.1`
 
 统一响应格式：
 
@@ -205,94 +206,20 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services \
     "configName": "",
     "xms": "128m",
     "xmx": "128m",
-    "user": "root",
-    "autoStart": false
+    "user": "root"
   }'
 ```
 
-修改服务并自动重命名：
+查询服务列表：
 
 ```bash
-curl -X PUT http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "host": "127.0.0.1",
-    "jobName": "demo-project",
-    "moduleName": "member-v2",
-    "javaPath": "/usr/local/jdk17/bin/java",
-    "active": "prod",
-    "port": 9002,
-    "jarName": "member-v2.jar",
-    "configName": "",
-    "xms": "128m",
-    "xmx": "128m",
-    "user": "root",
-    "autoStart": false
-  }'
-```
-
-删除服务：
-
-```bash
-curl -X DELETE 'http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member?host=127.0.0.1&deleteBackup=false' \
+curl 'http://127.0.0.1:18880/admin/api/supervisor/services?host=127.0.0.1' \
   -H 'Authorization: Bearer <access-token>'
 ```
 
-备份配置：
+查询服务详情：
 
 ```bash
-curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member/backup \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"host":"127.0.0.1"}'
-```
-
-还原配置：
-
-```bash
-curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member/restore \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{"host":"127.0.0.1"}'
-```
-
-检测端口冲突：
-
-```bash
-curl 'http://127.0.0.1:18880/admin/api/supervisor/ports/check?host=127.0.0.1&port=9001' \
-  -H 'Authorization: Bearer <access-token>'
-```
-
-## 生产安全建议
-
-- 目标主机必须通过配置白名单声明，不允许调用方传入任意目标
-- `JWT_SECRET` 必须使用高强度随机值，禁止直接沿用示例配置
-- MySQL 账号只授予当前业务库的最小权限
-- 严格限制 `sudoers` 和提权代理只允许执行受控命令
-- `ansible` 节点需要最小权限访问 Inventory 与 SSH 凭据
-- 不要把生产数据库密码、JWT 密钥、Inventory、SSH 密钥提交到仓库
-- 配置目录必须固定在 `/etc/supervisord.d`
-
-## 验收命令
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pytest -q
-uvicorn app.main:app --host 0.0.0.0 --port 18880
-```
-
-接口验证：
-
-```bash
-curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@123456"}'
-```
-
-```bash
-curl 'http://127.0.0.1:18880/admin/api/supervisor/ports/check?host=127.0.0.1&port=9001' \
+curl 'http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member?host=127.0.0.1' \
   -H 'Authorization: Bearer <access-token>'
 ```

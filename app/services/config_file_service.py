@@ -14,8 +14,17 @@ from app.services.template_service import ParsedConfig, TemplateService
 
 
 @dataclass(frozen=True)
+class RawConfig:
+    """原始配置文件内容。"""
+
+    config_name: str
+    path: str
+    content: str
+
+
+@dataclass(frozen=True)
 class StoredConfig:
-    """存储在目标主机上的配置。"""
+    """存储在目标主机上的可解析配置。"""
 
     config_name: str
     path: str
@@ -47,26 +56,39 @@ class ConfigFileService:
         current = now or datetime.now()
         return current.strftime("%Y%m%d-%H%M%S")
 
-    def list_configs(self, host: str, include_backups: bool = True) -> list[StoredConfig]:
-        """列出目标主机上的配置文件。"""
+    def list_config_paths(self, host: str, include_backups: bool = True) -> list[Path]:
+        """列出目标主机上的配置路径。"""
         executor = self.host_service.get_executor(host)
         try:
             paths = executor.list_configs(self._conf_dir())
         except ExecutorRuntimeError as exc:
             raise FileOperationError(f"读取配置目录失败: {exc}") from exc
+        if include_backups:
+            return paths
+        return [path for path in paths if path.name.endswith(".ini")]
 
+    def list_raw_configs(self, host: str, include_backups: bool = True) -> list[RawConfig]:
+        """读取目标主机上的原始配置内容。"""
+        executor = self.host_service.get_executor(host)
+        result: list[RawConfig] = []
+        for path in self.list_config_paths(host, include_backups=include_backups):
+            try:
+                content = executor.read_text(path)
+            except ExecutorRuntimeError as exc:
+                raise FileOperationError(f"读取配置文件失败: {path.name}") from exc
+            result.append(RawConfig(config_name=path.name, path=str(path), content=content))
+        return result
+
+    def list_configs(self, host: str, include_backups: bool = True) -> list[StoredConfig]:
+        """列出目标主机上的可解析配置文件。"""
         result: list[StoredConfig] = []
-        for path in paths:
-            if not include_backups and not path.name.endswith(".ini"):
-                continue
-            content = executor.read_text(path)
-            parsed = self.template_service.parse(content)
+        for item in self.list_raw_configs(host, include_backups=include_backups):
             result.append(
                 StoredConfig(
-                    config_name=path.name,
-                    path=str(path),
-                    content=content,
-                    parsed=parsed,
+                    config_name=item.config_name,
+                    path=item.path,
+                    content=item.content,
+                    parsed=self.template_service.parse(item.content),
                 )
             )
         return result
@@ -85,18 +107,38 @@ class ConfigFileService:
         config_path = self.build_config_path(config_name, program_name)
         return executor.path_exists(config_path)
 
-    def read_config(self, host: str, config_name: str, program_name: str | None = None) -> StoredConfig:
-        """读取指定配置。"""
+    def read_raw_config(self, host: str, config_name: str, program_name: str | None = None) -> RawConfig:
+        """读取指定配置的原始文本。"""
         executor = self.host_service.get_executor(host)
         config_path = self.build_config_path(config_name, program_name)
         if not executor.path_exists(config_path):
             raise ConfigNotFoundError(f"配置文件不存在: {config_path.name}")
-        content = executor.read_text(config_path)
+        try:
+            content = executor.read_text(config_path)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"读取配置文件失败: {config_path.name}") from exc
+        return RawConfig(config_name=config_path.name, path=str(config_path), content=content)
+
+    def read_raw_config_optional(self, host: str, config_name: str, program_name: str | None = None) -> RawConfig | None:
+        """读取配置，不存在时返回 None。"""
+        executor = self.host_service.get_executor(host)
+        config_path = self.build_config_path(config_name, program_name)
+        if not executor.path_exists(config_path):
+            return None
+        try:
+            content = executor.read_text(config_path)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"读取配置文件失败: {config_path.name}") from exc
+        return RawConfig(config_name=config_path.name, path=str(config_path), content=content)
+
+    def read_config(self, host: str, config_name: str, program_name: str | None = None) -> StoredConfig:
+        """读取指定配置。"""
+        raw_config = self.read_raw_config(host, config_name, program_name=program_name)
         return StoredConfig(
-            config_name=config_path.name,
-            path=str(config_path),
-            content=content,
-            parsed=self.template_service.parse(content),
+            config_name=raw_config.config_name,
+            path=raw_config.path,
+            content=raw_config.content,
+            parsed=self.template_service.parse(raw_config.content),
         )
 
     def write_config(self, host: str, config_name: str, content: str, program_name: str | None = None) -> str:

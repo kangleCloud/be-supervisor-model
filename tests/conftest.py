@@ -171,7 +171,9 @@ class FakeMySQLServer:
         self.auto_increment: dict[str, int] = {
             "sys_login_log": 1,
             "sys_login_token": 1,
+            "sys_supervisor_service": 1,
         }
+        self.fail_next_supervisor_insert = False
 
     def connect_server(self):
         return FakeMySQLConnection(self, include_database=False)
@@ -214,6 +216,48 @@ class FakeMySQLServer:
                 "update_by": "system",
                 "version": 0,
                 "remark": "测试账号",
+            }
+        )
+
+    def seed_supervisor_service(
+        self,
+        *,
+        host_ip: str,
+        job_name: str,
+        module_name: str,
+        program_name: str,
+        config_name: str,
+        java_path: str,
+        active_profile: str,
+        port: int,
+        jar_name: str,
+        xms: str,
+        xmx: str,
+        run_user: str,
+    ) -> None:
+        self.tables.setdefault("sys_supervisor_service", [])
+        record_id = self.auto_increment["sys_supervisor_service"]
+        self.auto_increment["sys_supervisor_service"] += 1
+        self.tables["sys_supervisor_service"].append(
+            {
+                "id": record_id,
+                "host_ip": host_ip,
+                "job_name": job_name,
+                "module_name": module_name,
+                "program_name": program_name,
+                "config_name": config_name,
+                "java_path": java_path,
+                "active_profile": active_profile,
+                "port": port,
+                "jar_name": jar_name,
+                "xms": xms,
+                "xmx": xmx,
+                "run_user": run_user,
+                "create_by_id": 0,
+                "create_by": "system",
+                "update_by_id": 0,
+                "update_by": "system",
+                "remark": "测试服务",
             }
         )
 
@@ -393,6 +437,72 @@ class FakeMySQLServer:
                 }
             )
             cursor.lastrowid = log_id
+            return 1
+
+        if "FROM sys_supervisor_service WHERE host_ip = %s ORDER BY id ASC" in normalized:
+            host_ip = str(params[0])
+            rows = [item for item in self.tables.get("sys_supervisor_service", []) if item["host_ip"] == host_ip]
+            cursor.results = [dict(item) for item in rows]
+            return len(cursor.results)
+
+        if "FROM sys_supervisor_service WHERE host_ip = %s AND program_name = %s LIMIT 1" in normalized:
+            host_ip = str(params[0])
+            program_name = str(params[1])
+            row = next(
+                (
+                    item
+                    for item in self.tables.get("sys_supervisor_service", [])
+                    if item["host_ip"] == host_ip and item["program_name"] == program_name
+                ),
+                None,
+            )
+            cursor.results = [dict(row)] if row else []
+            return len(cursor.results)
+
+        if normalized.startswith("INSERT INTO sys_supervisor_service("):
+            if self.fail_next_supervisor_insert:
+                self.fail_next_supervisor_insert = False
+                raise RuntimeError("模拟 Supervisor 主数据写库失败")
+
+            host_ip = str(params[0])
+            program_name = str(params[3])
+            config_name = str(params[4])
+            port = int(params[7])
+            for item in self.tables.get("sys_supervisor_service", []):
+                if item["host_ip"] != host_ip:
+                    continue
+                if item["program_name"] == program_name:
+                    raise RuntimeError("duplicate program_name")
+                if item["config_name"] == config_name:
+                    raise RuntimeError("duplicate config_name")
+                if int(item["port"]) == port:
+                    raise RuntimeError("duplicate port")
+
+            record_id = self.auto_increment["sys_supervisor_service"]
+            self.auto_increment["sys_supervisor_service"] += 1
+            self.tables.setdefault("sys_supervisor_service", []).append(
+                {
+                    "id": record_id,
+                    "host_ip": host_ip,
+                    "job_name": str(params[1]),
+                    "module_name": str(params[2]),
+                    "program_name": program_name,
+                    "config_name": config_name,
+                    "java_path": str(params[5]),
+                    "active_profile": str(params[6]),
+                    "port": port,
+                    "jar_name": str(params[8]),
+                    "xms": str(params[9]),
+                    "xmx": str(params[10]),
+                    "run_user": str(params[11]),
+                    "create_by_id": params[12],
+                    "create_by": params[13],
+                    "update_by_id": params[14],
+                    "update_by": params[15],
+                    "remark": params[16],
+                }
+            )
+            cursor.lastrowid = record_id
             return 1
 
         raise AssertionError(f"Unsupported SQL: {normalized}")

@@ -9,6 +9,8 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
+from app.core.env_loader import build_runtime_environ
+
 
 DEFAULT_APP_HOST = "0.0.0.0"
 DEFAULT_APP_PORT = 18880
@@ -239,25 +241,27 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     """加载配置。"""
     raw_environ = environ if environ is not None else os.environ
     repo_root = _repo_root()
-    config_path = Path((raw_environ.get("APP_CONFIG_PATH") or "").strip() or repo_root / "config.yaml").expanduser()
+    runtime_environ = build_runtime_environ(raw_environ, repo_root)
+    # 允许 APP_CONFIG_PATH 也来自 .env.dev / .env.prod，便于环境文件切换整套配置。
+    config_path = Path((runtime_environ.get("APP_CONFIG_PATH") or "").strip() or repo_root / "config.yaml").expanduser()
     if not config_path.is_absolute():
         config_path = (repo_root / config_path).resolve()
     config_data = _load_yaml_config(config_path)
 
     app_settings = AppSettings(
-        host=_optional_string(raw_environ, "APP_HOST", config_data, ("app", "host"), DEFAULT_APP_HOST),
-        port=_optional_int(raw_environ, "APP_PORT", config_data, ("app", "port"), DEFAULT_APP_PORT),
-        log_level=_optional_log_level(raw_environ, "APP_LOG_LEVEL", config_data, ("app", "logLevel"), DEFAULT_APP_LOG_LEVEL),
+        host=_optional_string(runtime_environ, "APP_HOST", config_data, ("app", "host"), DEFAULT_APP_HOST),
+        port=_optional_int(runtime_environ, "APP_PORT", config_data, ("app", "port"), DEFAULT_APP_PORT),
+        log_level=_optional_log_level(runtime_environ, "APP_LOG_LEVEL", config_data, ("app", "logLevel"), DEFAULT_APP_LOG_LEVEL),
     )
 
     database_settings = DatabaseSettings(
-        host=_optional_string(raw_environ, "DATABASE_HOST", config_data, ("database", "host"), DEFAULT_DATABASE_HOST),
-        port=_optional_int(raw_environ, "DATABASE_PORT", config_data, ("database", "port"), DEFAULT_DATABASE_PORT),
-        database=_required_string(raw_environ, "DATABASE_NAME", config_data, ("database", "name"), DEFAULT_DATABASE_NAME),
-        user=_optional_string(raw_environ, "DATABASE_USER", config_data, ("database", "user"), DEFAULT_DATABASE_USER),
-        password=_optional_string(raw_environ, "DATABASE_PASSWORD", config_data, ("database", "password"), ""),
+        host=_optional_string(runtime_environ, "DATABASE_HOST", config_data, ("database", "host"), DEFAULT_DATABASE_HOST),
+        port=_optional_int(runtime_environ, "DATABASE_PORT", config_data, ("database", "port"), DEFAULT_DATABASE_PORT),
+        database=_required_string(runtime_environ, "DATABASE_NAME", config_data, ("database", "name"), DEFAULT_DATABASE_NAME),
+        user=_optional_string(runtime_environ, "DATABASE_USER", config_data, ("database", "user"), DEFAULT_DATABASE_USER),
+        password=_optional_string(runtime_environ, "DATABASE_PASSWORD", config_data, ("database", "password"), ""),
         connect_timeout_seconds=_optional_int(
-            raw_environ,
+            runtime_environ,
             "DATABASE_CONNECT_TIMEOUT_SECONDS",
             config_data,
             ("database", "connectTimeoutSeconds"),
@@ -266,9 +270,9 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     )
 
     auth_settings = AuthSettings(
-        jwt_secret=_required_string(raw_environ, "JWT_SECRET", config_data, ("auth", "jwtSecret")),
+        jwt_secret=_required_string(runtime_environ, "JWT_SECRET", config_data, ("auth", "jwtSecret")),
         access_token_expire_minutes=_optional_int(
-            raw_environ,
+            runtime_environ,
             "ACCESS_TOKEN_EXPIRE_MINUTES",
             config_data,
             ("auth", "accessTokenExpireMinutes"),
@@ -277,9 +281,9 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     )
 
     supervisor_settings = SupervisorSettings(
-        conf_dir=_optional_path(raw_environ, "SUPERVISOR_CONF_DIR", config_data, ("supervisor", "confDir"), DEFAULT_CONF_DIR),
+        conf_dir=_optional_path(runtime_environ, "SUPERVISOR_CONF_DIR", config_data, ("supervisor", "confDir"), DEFAULT_CONF_DIR),
         command_timeout_seconds=_optional_int(
-            raw_environ,
+            runtime_environ,
             "COMMAND_TIMEOUT_SECONDS",
             config_data,
             ("supervisor", "commandTimeoutSeconds"),
@@ -288,23 +292,23 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
     )
 
     executor_settings = ExecutorSettings(
-        default_type=_optional_string(raw_environ, "EXECUTOR_TYPE", config_data, ("executor", "type"), DEFAULT_EXECUTOR_TYPE).lower(),
+        default_type=_optional_string(runtime_environ, "EXECUTOR_TYPE", config_data, ("executor", "type"), DEFAULT_EXECUTOR_TYPE).lower(),
         ansible_inventory_path=_optional_path(
-            raw_environ,
+            runtime_environ,
             "ANSIBLE_INVENTORY_PATH",
             config_data,
             ("executor", "inventoryPath"),
             DEFAULT_ANSIBLE_INVENTORY_PATH,
         ),
         ansible_remote_user=_optional_string(
-            raw_environ,
+            runtime_environ,
             "ANSIBLE_REMOTE_USER",
             config_data,
             ("executor", "remoteUser"),
             DEFAULT_ANSIBLE_REMOTE_USER,
         ),
         ansible_timeout_seconds=_optional_int(
-            raw_environ,
+            runtime_environ,
             "ANSIBLE_COMMAND_TIMEOUT_SECONDS",
             config_data,
             ("executor", "timeoutSeconds"),

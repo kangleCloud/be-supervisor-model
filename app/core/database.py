@@ -16,8 +16,10 @@ from app.core.config import Settings
 MIGRATION_FILE_PATTERN = re.compile(r"^(?P<version>\d+)_.*\.sql$")
 DATABASE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "database" / "migrations"
-AUTH_BASELINE_VERSION = 1
-REQUIRED_AUTH_TABLES = ("sys_user", "sys_login_log", "sys_login_token")
+REQUIRED_TABLE_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: ("sys_user", "sys_login_log", "sys_login_token"),
+    3: ("sys_supervisor_service",),
+}
 
 
 def _connect(settings: Settings, *, include_database: bool) -> Connection:
@@ -88,7 +90,7 @@ def initialize_database(settings: Settings) -> None:
                     (version, migration_path.name),
                 )
             # 历史版本记录只能说明“迁移曾尝试执行”，不能说明关键表一定真实存在。
-            _ensure_required_auth_tables(cursor, migrations)
+            _ensure_required_tables(cursor, migrations)
         database_connection.commit()
     finally:
         database_connection.close()
@@ -127,21 +129,22 @@ def _execute_script(cursor: Cursor, script: str) -> None:
         cursor.execute(statement)
 
 
-def _ensure_required_auth_tables(cursor: Cursor, migrations: list[tuple[int, Path]]) -> None:
-    """校验认证基线表存在，缺表时重放基线 DDL 做补建。"""
-    missing_tables = _find_missing_tables(cursor, REQUIRED_AUTH_TABLES)
-    if not missing_tables:
-        return
+def _ensure_required_tables(cursor: Cursor, migrations: list[tuple[int, Path]]) -> None:
+    """校验关键业务表存在，缺表时按对应迁移补建。"""
+    for version, table_names in REQUIRED_TABLE_MIGRATIONS.items():
+        missing_tables = _find_missing_tables(cursor, table_names)
+        if not missing_tables:
+            continue
 
-    baseline_path = _find_migration_path(migrations, AUTH_BASELINE_VERSION)
-    if baseline_path is None:
-        raise RuntimeError("缺少认证基线迁移文件，无法自动补建表")
+        migration_path = _find_migration_path(migrations, version)
+        if migration_path is None:
+            raise RuntimeError(f"缺少关键迁移文件，无法自动补建表: version={version}")
 
-    _execute_script(cursor, baseline_path.read_text(encoding="utf-8"))
-    missing_tables = _find_missing_tables(cursor, REQUIRED_AUTH_TABLES)
-    if missing_tables:
-        missing_text = ", ".join(missing_tables)
-        raise RuntimeError(f"关键认证表创建失败: {missing_text}")
+        _execute_script(cursor, migration_path.read_text(encoding="utf-8"))
+        missing_tables = _find_missing_tables(cursor, table_names)
+        if missing_tables:
+            missing_text = ", ".join(missing_tables)
+            raise RuntimeError(f"关键业务表创建失败: {missing_text}")
 
 
 def _find_missing_tables(cursor: Cursor, table_names: tuple[str, ...]) -> list[str]:

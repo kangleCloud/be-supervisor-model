@@ -1,22 +1,13 @@
 """Supervisor API 请求模型。"""
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.security import ensure_safe_name, ensure_valid_port
 
 
-class HostRequest(BaseModel):
-    """仅携带目标主机的请求。"""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    host: str = Field(..., description="目标主机 IP")
-
-
-class ServiceUpsertRequest(BaseModel):
-    """新增或修改服务请求。"""
+class ServiceCreateRequest(BaseModel):
+    """新增服务请求。"""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -31,7 +22,6 @@ class ServiceUpsertRequest(BaseModel):
     xms: str = Field(default="128m", description="JVM Xms 参数")
     xmx: str = Field(default="128m", description="JVM Xmx 参数")
     user: str = Field(default="root", description="Supervisor 运行用户")
-    auto_start: bool = Field(default=False, alias="autoStart", description="配置变更完成后是否立即启动服务")
 
     @field_validator("port")
     @classmethod
@@ -62,25 +52,3 @@ class ServiceUpsertRequest(BaseModel):
         if not raw_value:
             raise ValueError(f"{info.field_name} 不能为空")
         return raw_value
-
-
-class DeleteServiceQuery(BaseModel):
-    """删除服务请求参数。"""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    host: str = Field(..., description="目标主机 IP")
-    delete_backup: bool = Field(default=False, alias="deleteBackup", description="是否同时删除备份文件")
-
-
-class PortCheckQuery(BaseModel):
-    """端口冲突检测请求参数。"""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-    host: str = Field(..., description="目标主机 IP")
-    port: int = Field(..., description="待检测端口")
-    exclude_config: Optional[str] = Field(default=None, alias="excludeConfig", description="排除的当前配置文件名")
-
-    @field_validator("port")
-    @classmethod
-    def validate_port(cls, value: int) -> int:
-        return ensure_valid_port(value)

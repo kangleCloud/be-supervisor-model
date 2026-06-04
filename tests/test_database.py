@@ -14,7 +14,8 @@ def test_database_initialization_is_idempotent(settings, fake_mysql):
     assert "sys_user" in fake_mysql.tables
     assert "sys_login_log" in fake_mysql.tables
     assert "sys_login_token" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2]
+    assert "sys_supervisor_service" in fake_mysql.tables
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
 
 
 def test_database_bootstraps_single_super_admin(settings, fake_mysql):
@@ -37,7 +38,19 @@ def test_database_recreates_missing_auth_tables(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_login_token" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2]
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
+
+
+def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
+    """Supervisor 主数据表缺失时，启动阶段也应自动补建。"""
+    initialize_database(settings)
+
+    del fake_mysql.tables["sys_supervisor_service"]
+
+    initialize_database(settings)
+
+    assert "sys_supervisor_service" in fake_mysql.tables
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):
@@ -79,3 +92,14 @@ def test_super_admin_seed_sql_exists():
     assert "'admin'" in migration_sql
     assert "'超级管理员'" in migration_sql
     assert "'系统初始化超级管理员，请尽快重置默认密码'" in migration_sql
+
+
+def test_supervisor_service_migration_sql_contains_unique_keys():
+    """Supervisor 主数据表迁移需要声明三组唯一约束。"""
+    migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "003_init_supervisor_service_table.sql"
+    migration_sql = migration_path.read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_sql
+    assert "UNIQUE KEY `uk_supervisor_host_program` (`host_ip`, `program_name`)" in migration_sql
+    assert "UNIQUE KEY `uk_supervisor_host_config` (`host_ip`, `config_name`)" in migration_sql
+    assert "UNIQUE KEY `uk_supervisor_host_port` (`host_ip`, `port`)" in migration_sql

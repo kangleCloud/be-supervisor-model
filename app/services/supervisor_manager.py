@@ -1,16 +1,26 @@
 """Supervisor 业务编排服务。"""
 from __future__ import annotations
 
-from typing import Optional
+import logging
 
-from app.core.exceptions import ConfigAlreadyExistsError
-from app.core.security import ensure_safe_program_name
-from app.schemas.supervisor import ServiceUpsertRequest
+from app.core.exceptions import AppError, InternalError
+from app.schemas.supervisor import ServiceCreateRequest
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.port_check_service import PortCheckService
+from app.services.supervisor_registry_service import (
+    SupervisorRegistryCreateData,
+    SupervisorRegistryRecord,
+    SupervisorRegistryService,
+)
 from app.services.supervisor_service import SupervisorService
 from app.services.template_service import TemplateService
+
+
+LOGGER = logging.getLogger(__name__)
+FILE_STATE_MATCH = "MATCH"
+FILE_STATE_MISSING = "MISSING"
+FILE_STATE_MISMATCH = "MISMATCH"
 
 
 class SupervisorManager:
@@ -23,189 +33,161 @@ class SupervisorManager:
         config_file_service: ConfigFileService,
         port_check_service: PortCheckService,
         supervisor_service: SupervisorService,
+        registry_service: SupervisorRegistryService,
     ):
         self.host_service = host_service
         self.template_service = template_service
         self.config_file_service = config_file_service
         self.port_check_service = port_check_service
         self.supervisor_service = supervisor_service
+        self.registry_service = registry_service
 
     def list_hosts(self) -> list[dict[str, object]]:
         """返回允许的主机列表。"""
         return self.host_service.list_hosts()
 
     def list_services(self, host: str) -> list[dict[str, object]]:
-        """列出服务及其状态。"""
+        """列出数据库中的纳管服务，并实时补充文件状态与运行状态。"""
         self.host_service.get_host(host)
         status_map = {item.program_name: item.to_dict() for item in self.supervisor_service.status(host)}
-        records = self.config_file_service.list_configs(host, include_backups=False)
-        result = []
-        for record in records:
+        result: list[dict[str, object]] = []
+        for record in self.registry_service.list_by_host(host):
+            expected_content = self._render_expected_content(record)
+            file_state = self._detect_file_state(host, record, expected_content)
             result.append(
-                {
-                    "configName": record.config_name,
-                    "configPath": record.path,
-                    "programName": record.parsed.program_name,
-                    "port": record.parsed.port,
-                    "javaPath": record.parsed.java_path,
-                    "active": record.parsed.active,
-                    "jarName": record.parsed.jar_name,
-                    "xms": record.parsed.xms,
-                    "xmx": record.parsed.xmx,
-                    "options": record.parsed.options,
-                    "status": status_map.get(record.parsed.program_name),
-                }
+                self._build_service_payload(
+                    record,
+                    status=status_map.get(record.program_name),
+                    file_state=file_state,
+                )
             )
         return result
 
     def get_service_detail(self, host: str, program_name: str) -> dict[str, object]:
-        """查看单个服务详情。"""
-        record = self.config_file_service.find_by_program_name(host, program_name)
-        status_entries = self.supervisor_service.status(host, record.parsed.program_name)
+        """返回纳管服务详情、期望配置与远端漂移信息。"""
+        self.host_service.get_host(host)
+        record = self.registry_service.get_by_program_name(host, program_name)
+        expected_content = self._render_expected_content(record)
+        remote_config = self.config_file_service.read_raw_config_optional(host, record.config_name, record.program_name)
+        status_entries = self.supervisor_service.status(host, record.program_name)
         status = status_entries[0].to_dict() if status_entries else None
-        return {
-            "configName": record.config_name,
-            "configPath": record.path,
-            "programName": record.parsed.program_name,
-            "content": record.content,
-            "parsed": {
-                "programName": record.parsed.program_name,
-                "port": record.parsed.port,
-                "javaPath": record.parsed.java_path,
-                "active": record.parsed.active,
-                "jarName": record.parsed.jar_name,
-                "xms": record.parsed.xms,
-                "xmx": record.parsed.xmx,
-                "options": record.parsed.options,
-            },
-            "status": status,
-        }
+        file_state = self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
+        payload = self._build_service_payload(record, status=status, file_state=file_state)
+        payload["expectedContent"] = expected_content
+        if file_state == FILE_STATE_MISMATCH and remote_config is not None:
+            payload["remoteContent"] = remote_config.content
+        return payload
 
-    def create_service(self, payload: ServiceUpsertRequest) -> dict[str, object]:
-        """新增 Supervisor 服务。"""
+    def create_service(self, payload: ServiceCreateRequest, current_user) -> dict[str, object]:
+        """新增服务并在远端和数据库中同步落地。"""
         self.host_service.get_host(payload.host)
         rendered = self.template_service.render(payload)
+        registry_data = SupervisorRegistryCreateData(
+            host_ip=payload.host,
+            job_name=payload.job_name,
+            module_name=payload.module_name,
+            program_name=rendered.program_name,
+            config_name=rendered.config_name,
+            java_path=payload.java_path,
+            active_profile=payload.active,
+            port=payload.port,
+            jar_name=payload.jar_name or self.template_service.build_default_jar_name(payload.module_name),
+            xms=payload.xms,
+            xmx=payload.xmx,
+            run_user=payload.user,
+        )
+        self.registry_service.ensure_can_create(registry_data)
         self.config_file_service.ensure_not_exists(payload.host, rendered.config_name, rendered.program_name)
         self.port_check_service.ensure_no_conflict(payload.host, payload.port)
-        config_path = self.config_file_service.write_config(payload.host, rendered.config_name, rendered.content, rendered.program_name)
-        reread_result = self.supervisor_service.reread(payload.host)
-        update_result = self.supervisor_service.update(payload.host)
-        start_result = self.supervisor_service.start(payload.host, rendered.program_name) if payload.auto_start else None
-        return {
-            "host": payload.host,
-            "programName": rendered.program_name,
-            "configName": rendered.config_name,
-            "configPath": config_path,
-            "reread": reread_result,
-            "update": update_result,
-            "start": start_result,
-        }
 
-    def update_service(self, current_program_name: str, payload: ServiceUpsertRequest) -> dict[str, object]:
-        """修改服务并允许自动重命名。"""
-        safe_current_program_name = ensure_safe_program_name(current_program_name)
-        existing = self.config_file_service.find_by_program_name(payload.host, safe_current_program_name)
-        rendered = self.template_service.render(payload)
-        self.supervisor_service.stop(payload.host, safe_current_program_name)
-        backup_result = self.config_file_service.backup_config(payload.host, existing.config_name, existing.parsed.program_name)
-        if rendered.config_name != existing.config_name and self.config_file_service.exists(payload.host, rendered.config_name, rendered.program_name):
-            raise ConfigAlreadyExistsError(f"配置文件已存在: {rendered.config_name}")
-        self.port_check_service.ensure_no_conflict(payload.host, payload.port, exclude_config=existing.config_name)
-        config_path = self.config_file_service.write_config(payload.host, rendered.config_name, rendered.content, rendered.program_name)
-        if rendered.config_name != existing.config_name:
-            self.config_file_service.delete_config(payload.host, existing.config_name, delete_backup=False, program_name=existing.parsed.program_name)
-        reread_result = self.supervisor_service.reread(payload.host)
-        update_result = self.supervisor_service.update(payload.host)
-        start_result = self.supervisor_service.start(payload.host, rendered.program_name) if payload.auto_start else None
-        return {
-            "host": payload.host,
-            "oldProgramName": safe_current_program_name,
-            "newProgramName": rendered.program_name,
-            "oldConfigName": existing.config_name,
-            "newConfigName": rendered.config_name,
-            "configPath": config_path,
-            "backup": backup_result,
-            "reread": reread_result,
-            "update": update_result,
-            "start": start_result,
-        }
+        self.config_file_service.write_config(payload.host, rendered.config_name, rendered.content, rendered.program_name)
+        self.supervisor_service.reread(payload.host)
+        self.supervisor_service.update(payload.host)
 
-    def delete_service(self, host: str, program_name: str, delete_backup: bool = False) -> dict[str, object]:
-        """删除服务配置。"""
-        record = self.config_file_service.find_by_program_name(host, program_name)
-        self.supervisor_service.stop(host, record.parsed.program_name, allow_not_running=True)
-        backup_result = self.config_file_service.backup_config(host, record.config_name, record.parsed.program_name)
-        delete_result = self.config_file_service.delete_config(host, record.config_name, delete_backup=delete_backup, program_name=record.parsed.program_name)
-        reread_result = self.supervisor_service.reread(host)
-        update_result = self.supervisor_service.update(host)
-        return {
-            "host": host,
-            "programName": record.parsed.program_name,
-            "configName": record.config_name,
-            "backup": backup_result,
-            "delete": delete_result,
-            "reread": reread_result,
-            "update": update_result,
-        }
+        try:
+            record = self.registry_service.create(
+                registry_data,
+                operator_id=current_user.user_id,
+                operator_name=current_user.username,
+                remark="Supervisor 服务配置",
+            )
+        except Exception as exc:
+            rollback_result = self._rollback_remote_create(payload.host, rendered.config_name, rendered.program_name)
+            if isinstance(exc, AppError):
+                raise
+            LOGGER.exception("create supervisor registry failed", exc_info=exc)
+            raise InternalError("新增服务写库失败", rollback_result) from exc
 
-    def backup_service(self, host: str, program_name: str) -> dict[str, object]:
-        """备份指定服务。"""
-        record = self.config_file_service.find_by_program_name(host, program_name)
-        result = self.config_file_service.backup_config(host, record.config_name, record.parsed.program_name)
-        return {"host": host, "programName": record.parsed.program_name, **result}
+        status_entries = self.supervisor_service.status(payload.host, record.program_name)
+        status = status_entries[0].to_dict() if status_entries else None
+        return self._build_service_payload(record, status=status, file_state=FILE_STATE_MATCH)
 
-    def restore_service(self, host: str, program_name: str, auto_start: bool = False) -> dict[str, object]:
-        """还原指定服务。"""
-        record = self.config_file_service.find_by_program_name(host, program_name, include_backups=True)
-        restore_config_name = self._restore_target_config_name(record.config_name)
-        restore_result = self.config_file_service.restore_config(host, restore_config_name, record.parsed.program_name)
-        reread_result = self.supervisor_service.reread(host)
-        update_result = self.supervisor_service.update(host)
-        start_result = self.supervisor_service.start(host, record.parsed.program_name) if auto_start else None
-        return {
-            "host": host,
-            "programName": record.parsed.program_name,
-            "restore": restore_result,
-            "reread": reread_result,
-            "update": update_result,
-            "start": start_result,
-        }
+    def _render_expected_content(self, record: SupervisorRegistryRecord) -> str:
+        """数据库字段是主数据，详情和漂移判断都以此渲染期望配置。"""
+        rendered = self.template_service.render_service(
+            job_name=record.job_name,
+            module_name=record.module_name,
+            java_path=record.java_path,
+            active=record.active_profile,
+            port=record.port,
+            jar_name=record.jar_name,
+            config_name=record.config_name,
+            xms=record.xms,
+            xmx=record.xmx,
+            user=record.run_user,
+        )
+        return rendered.content
 
-    def start_service(self, host: str, program_name: str) -> dict[str, object]:
-        """启动服务。"""
-        return {"host": host, "programName": program_name, "result": self.supervisor_service.start(host, program_name)}
-
-    def stop_service(self, host: str, program_name: str) -> dict[str, object]:
-        """停止服务。"""
-        return {"host": host, "programName": program_name, "result": self.supervisor_service.stop(host, program_name, allow_not_running=True)}
-
-    def restart_service(self, host: str, program_name: str) -> dict[str, object]:
-        """重启服务。"""
-        return {"host": host, "programName": program_name, "result": self.supervisor_service.restart(host, program_name)}
-
-    def reread(self, host: str) -> dict[str, object]:
-        """执行 reread。"""
-        return {"host": host, "result": self.supervisor_service.reread(host)}
-
-    def update(self, host: str) -> dict[str, object]:
-        """执行 update。"""
-        return {"host": host, "result": self.supervisor_service.update(host)}
-
-    def status(self, host: str, program_name: Optional[str] = None) -> list[dict[str, object]]:
-        """查询 Supervisor 状态。"""
-        self.host_service.get_host(host)
-        return [item.to_dict() for item in self.supervisor_service.status(host, program_name)]
-
-    def check_port(self, host: str, port: int, exclude_config: Optional[str] = None) -> dict[str, object]:
-        """执行端口冲突检测。"""
-        self.host_service.get_host(host)
-        conflicts = self.port_check_service.find_conflicts(host, port, exclude_config=exclude_config)
-        return {"host": host, "port": port, "conflicts": [item.to_dict() for item in conflicts]}
+    def _detect_file_state(self, host: str, record: SupervisorRegistryRecord, expected_content: str) -> str:
+        remote_config = self.config_file_service.read_raw_config_optional(host, record.config_name, record.program_name)
+        return self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
 
     @staticmethod
-    def _restore_target_config_name(file_name: str) -> str:
-        if file_name.endswith(".ini"):
-            return file_name
-        if ".ini.bak" in file_name:
-            return f"{file_name.split('.ini.bak', 1)[0]}.ini"
-        return file_name
+    def _resolve_file_state(expected_content: str, remote_content: str | None) -> str:
+        if remote_content is None:
+            return FILE_STATE_MISSING
+        if remote_content == expected_content:
+            return FILE_STATE_MATCH
+        return FILE_STATE_MISMATCH
+
+    def _rollback_remote_create(self, host: str, config_name: str, program_name: str) -> dict[str, object]:
+        """落库失败时立即删除刚写入的配置，并执行 reread/update 回滚现场。"""
+        rollback: dict[str, object] = {"configRemoved": False, "reread": None, "update": None}
+        try:
+            self.config_file_service.delete_config(host, config_name, delete_backup=False, program_name=program_name)
+            rollback["configRemoved"] = True
+        except AppError as exc:
+            rollback["configRemoveError"] = exc.msg
+            return rollback
+
+        try:
+            rollback["reread"] = self.supervisor_service.reread(host)
+            rollback["update"] = self.supervisor_service.update(host)
+        except AppError as exc:
+            rollback["rollbackError"] = exc.msg
+        return rollback
+
+    @staticmethod
+    def _build_service_payload(
+        record: SupervisorRegistryRecord,
+        *,
+        status: dict[str, object] | None,
+        file_state: str,
+    ) -> dict[str, object]:
+        return {
+            "id": record.id,
+            "host": record.host_ip,
+            "jobName": record.job_name,
+            "moduleName": record.module_name,
+            "programName": record.program_name,
+            "configName": record.config_name,
+            "javaPath": record.java_path,
+            "active": record.active_profile,
+            "port": record.port,
+            "jarName": record.jar_name,
+            "xms": record.xms,
+            "xmx": record.xmx,
+            "user": record.run_user,
+            "status": status,
+            "fileState": file_state,
+        }

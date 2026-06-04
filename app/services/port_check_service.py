@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Optional
 
 from app.core.exceptions import PortConflictError
@@ -12,6 +11,7 @@ from app.services.config_file_service import ConfigFileService
 
 
 PORT_PATTERN = re.compile(r"(?:-Dserver\.port=|server\.port=|port=)(?P<port>\d+)")
+PROGRAM_PATTERN = re.compile(r"^\[program:(?P<name>[^\]]+)\]", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class PortCheckService:
         """查找端口冲突。"""
         normalized_exclude = normalize_config_name(exclude_config, exclude_config) if exclude_config else None
         conflicts: list[PortConflict] = []
-        for record in self.config_file_service.list_configs(host, include_backups=True):
+        for record in self.config_file_service.list_raw_configs(host, include_backups=True):
             if normalized_exclude and self._should_skip(record.config_name, normalized_exclude):
                 continue
             for match in PORT_PATTERN.finditer(record.content):
@@ -45,7 +45,7 @@ class PortCheckService:
                     conflicts.append(
                         PortConflict(
                             file_path=record.path,
-                            program_name=record.parsed.program_name,
+                            program_name=self._extract_program_name(record.content, record.config_name),
                             port=current_port,
                         )
                     )
@@ -62,3 +62,10 @@ class PortCheckService:
     def _should_skip(file_name: str, exclude_config_name: str) -> bool:
         backup_prefix = f"{exclude_config_name}.bak"
         return file_name == exclude_config_name or file_name.startswith(backup_prefix)
+
+    @staticmethod
+    def _extract_program_name(content: str, default_name: str) -> str:
+        match = PROGRAM_PATTERN.search(content)
+        if match is None:
+            return default_name
+        return match.group("name")
