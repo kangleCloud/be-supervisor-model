@@ -1,30 +1,44 @@
 """Supervisor 主数据落库服务。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
+from pathlib import PurePosixPath
 
 from app.core.config import Settings
 from app.core.database import get_connection
-from app.core.exceptions import ConfigAlreadyExistsError, ConfigNotFoundError, PortConflictError
-from app.core.security import ensure_safe_host, ensure_safe_program_name, ensure_valid_port
+from app.core.exceptions import ConfigAlreadyExistsError, ConfigNotFoundError, ParamError, PortConflictError
+from app.core.security import ensure_safe_host, ensure_safe_program_name, ensure_valid_port, normalize_config_name, normalize_config_path
+
+
+MANAGE_MODE_TEMPLATE_MANAGED = "TEMPLATE_MANAGED"
+MANAGE_MODE_IMPORTED_READONLY = "IMPORTED_READONLY"
+ALLOWED_MANAGE_MODES = {MANAGE_MODE_TEMPLATE_MANAGED, MANAGE_MODE_IMPORTED_READONLY}
 
 
 @dataclass(frozen=True)
 class SupervisorRegistryCreateData:
-    """创建 Supervisor 主数据所需字段。"""
+    """写入 Supervisor 主数据所需字段。"""
 
     host_ip: str
-    job_name: str
-    module_name: str
-    program_name: str
-    config_name: str
-    java_path: str
-    active_profile: str
-    port: int
-    jar_name: str
-    xms: str
-    xmx: str
-    run_user: str
+    config_path: str
+    file_name: str
+    content_program_name: str
+    manage_mode: str
+    baseline_content: str
+    metadata_complete: bool
+    parse_warnings: tuple[str, ...] = ()
+    job_name: str | None = None
+    module_name: str | None = None
+    program_name: str | None = None
+    config_name: str | None = None
+    java_path: str | None = None
+    active_profile: str | None = None
+    port: int | None = None
+    jar_name: str | None = None
+    xms: str | None = None
+    xmx: str | None = None
+    run_user: str | None = None
 
 
 @dataclass(frozen=True)
@@ -33,17 +47,24 @@ class SupervisorRegistryRecord:
 
     id: int
     host_ip: str
-    job_name: str
-    module_name: str
+    config_path: str
+    file_name: str
+    content_program_name: str
+    manage_mode: str
+    baseline_content: str
+    metadata_complete: bool
+    parse_warnings: tuple[str, ...]
+    job_name: str | None
+    module_name: str | None
     program_name: str
     config_name: str
-    java_path: str
-    active_profile: str
-    port: int
-    jar_name: str
-    xms: str
-    xmx: str
-    run_user: str
+    java_path: str | None
+    active_profile: str | None
+    port: int | None
+    jar_name: str | None
+    xms: str | None
+    xmx: str | None
+    run_user: str | None
 
 
 class SupervisorRegistryService:
@@ -59,7 +80,9 @@ class SupervisorRegistryService:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, host_ip, job_name, module_name, program_name, config_name,
+                    SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
+                           baseline_content, metadata_complete, parse_warnings,
+                           job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user
                     FROM sys_supervisor_service
                     WHERE host_ip = %s
@@ -72,13 +95,22 @@ class SupervisorRegistryService:
 
     def get_by_program_name(self, host: str, program_name: str) -> SupervisorRegistryRecord:
         """按主机和 programName 查询单条记录。"""
+        record = self.get_by_program_name_optional(host, program_name)
+        if record is None:
+            raise ConfigNotFoundError(f"未找到服务 {ensure_safe_program_name(program_name)}")
+        return record
+
+    def get_by_program_name_optional(self, host: str, program_name: str) -> SupervisorRegistryRecord | None:
+        """按主机和 programName 查询单条记录，不存在时返回 None。"""
         safe_host = ensure_safe_host(host)
         safe_program_name = ensure_safe_program_name(program_name)
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, host_ip, job_name, module_name, program_name, config_name,
+                    SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
+                           baseline_content, metadata_complete, parse_warnings,
+                           job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user
                     FROM sys_supervisor_service
                     WHERE host_ip = %s AND program_name = %s
@@ -87,19 +119,40 @@ class SupervisorRegistryService:
                     (safe_host, safe_program_name),
                 )
                 row = cursor.fetchone()
-        if row is None:
-            raise ConfigNotFoundError(f"未找到服务 {safe_program_name}")
-        return self._build_record(row)
+        return self._build_record(row) if row is not None else None
+
+    def get_by_config_path_optional(self, host: str, config_path: str) -> SupervisorRegistryRecord | None:
+        """按主机和配置相对路径查询单条记录，不存在时返回 None。"""
+        safe_host = ensure_safe_host(host)
+        safe_config_path = normalize_config_path(config_path)
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
+                           baseline_content, metadata_complete, parse_warnings,
+                           job_name, module_name, program_name, config_name,
+                           java_path, active_profile, port, jar_name, xms, xmx, run_user
+                    FROM sys_supervisor_service
+                    WHERE host_ip = %s AND config_path = %s
+                    LIMIT 1
+                    """,
+                    (safe_host, safe_config_path),
+                )
+                row = cursor.fetchone()
+        return self._build_record(row) if row is not None else None
 
     def ensure_can_create(self, data: SupervisorRegistryCreateData) -> None:
-        """校验同主机下 programName、configName、port 不能重复。"""
-        ensure_valid_port(data.port)
-        for record in self.list_by_host(data.host_ip):
-            if record.program_name == data.program_name:
+        """校验同主机下 programName、configPath、port 不冲突。"""
+        normalized = self._normalize_write_data(data)
+        if normalized.port is not None:
+            ensure_valid_port(normalized.port)
+        for record in self.list_by_host(normalized.host_ip):
+            if record.program_name == normalized.program_name:
                 raise ConfigAlreadyExistsError(f"服务已存在: {record.program_name}")
-            if record.config_name == data.config_name:
-                raise ConfigAlreadyExistsError(f"配置文件已存在: {record.config_name}")
-            if record.port == data.port:
+            if record.config_path == normalized.config_path:
+                raise ConfigAlreadyExistsError(f"配置文件已存在: {record.config_path}")
+            if normalized.port is not None and record.port is not None and record.port == normalized.port:
                 raise PortConflictError(
                     "端口冲突",
                     [
@@ -107,6 +160,7 @@ class SupervisorRegistryService:
                             "host": record.host_ip,
                             "programName": record.program_name,
                             "configName": record.config_name,
+                            "configPath": record.config_path,
                             "port": record.port,
                         }
                     ],
@@ -121,45 +175,219 @@ class SupervisorRegistryService:
         remark: str,
     ) -> SupervisorRegistryRecord:
         """新增一条 Supervisor 主数据记录。"""
+        normalized = self._normalize_write_data(data)
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     INSERT INTO sys_supervisor_service(
                         host_ip, job_name, module_name, program_name, config_name,
+                        config_path, file_name, content_program_name, manage_mode,
+                        baseline_content, metadata_complete, parse_warnings,
                         java_path, active_profile, port, jar_name, xms, xmx, run_user,
                         create_by_id, create_by, update_by_id, update_by, remark
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s
+                    )
                     """,
-                    (
-                        data.host_ip,
-                        data.job_name,
-                        data.module_name,
-                        data.program_name,
-                        data.config_name,
-                        data.java_path,
-                        data.active_profile,
-                        data.port,
-                        data.jar_name,
-                        data.xms,
-                        data.xmx,
-                        data.run_user,
-                        operator_id,
-                        operator_name,
-                        operator_id,
-                        operator_name,
-                        remark,
-                    ),
+                    self._build_write_params(normalized, operator_id, operator_name, remark),
                 )
                 record_id = int(cursor.lastrowid)
             connection.commit()
+        return self._build_record_from_data(record_id, normalized)
+
+    def upsert_imported(
+        self,
+        data: SupervisorRegistryCreateData,
+        *,
+        operator_id: int,
+        operator_name: str,
+        remark: str,
+    ) -> tuple[SupervisorRegistryRecord, bool]:
+        """按 host + configPath 幂等写入只读导入快照。"""
+        normalized = self._normalize_write_data(data)
+        if normalized.manage_mode != MANAGE_MODE_IMPORTED_READONLY:
+            raise ParamError("导入快照必须使用 IMPORTED_READONLY 模式")
+
+        existing_by_path = self.get_by_config_path_optional(normalized.host_ip, normalized.config_path)
+        existing_by_program = self.get_by_program_name_optional(normalized.host_ip, normalized.program_name)
+        if existing_by_program is not None and existing_by_program.config_path != normalized.config_path:
+            raise ConfigAlreadyExistsError(f"服务已存在: {existing_by_program.program_name}")
+
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                if existing_by_path is None:
+                    cursor.execute(
+                        """
+                        INSERT INTO sys_supervisor_service(
+                            host_ip, job_name, module_name, program_name, config_name,
+                            config_path, file_name, content_program_name, manage_mode,
+                            baseline_content, metadata_complete, parse_warnings,
+                            java_path, active_profile, port, jar_name, xms, xmx, run_user,
+                            create_by_id, create_by, update_by_id, update_by, remark
+                        ) VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s
+                        )
+                        """,
+                        self._build_write_params(normalized, operator_id, operator_name, remark),
+                    )
+                    record_id = int(cursor.lastrowid)
+                    connection.commit()
+                    return self._build_record_from_data(record_id, normalized), True
+
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET job_name = %s,
+                        module_name = %s,
+                        program_name = %s,
+                        config_name = %s,
+                        config_path = %s,
+                        file_name = %s,
+                        content_program_name = %s,
+                        manage_mode = %s,
+                        baseline_content = %s,
+                        metadata_complete = %s,
+                        parse_warnings = %s,
+                        java_path = %s,
+                        active_profile = %s,
+                        port = %s,
+                        jar_name = %s,
+                        xms = %s,
+                        xmx = %s,
+                        run_user = %s,
+                        update_by_id = %s,
+                        update_by = %s,
+                        remark = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        normalized.job_name,
+                        normalized.module_name,
+                        normalized.program_name,
+                        normalized.config_name,
+                        normalized.config_path,
+                        normalized.file_name,
+                        normalized.content_program_name,
+                        normalized.manage_mode,
+                        normalized.baseline_content,
+                        int(normalized.metadata_complete),
+                        self._serialize_parse_warnings(normalized.parse_warnings),
+                        normalized.java_path,
+                        normalized.active_profile,
+                        normalized.port,
+                        normalized.jar_name,
+                        normalized.xms,
+                        normalized.xmx,
+                        normalized.run_user,
+                        operator_id,
+                        operator_name,
+                        remark,
+                        existing_by_path.id,
+                    ),
+                )
+            connection.commit()
+        return self._build_record_from_data(existing_by_path.id, normalized), False
+
+    def _normalize_write_data(self, data: SupervisorRegistryCreateData) -> SupervisorRegistryCreateData:
+        safe_host = ensure_safe_host(data.host_ip)
+        if data.manage_mode not in ALLOWED_MANAGE_MODES:
+            raise ParamError("manageMode 非法")
+
+        safe_program_name = ensure_safe_program_name(data.content_program_name)
+        safe_file_name = normalize_config_name(data.file_name, safe_program_name)
+        safe_config_path = normalize_config_path(data.config_path)
+        if PurePosixPath(safe_config_path).name != safe_file_name:
+            raise ParamError("configPath 与 fileName 不一致")
+
+        if data.port is not None:
+            ensure_valid_port(data.port)
+
+        return replace(
+            data,
+            host_ip=safe_host,
+            config_path=safe_config_path,
+            file_name=safe_file_name,
+            content_program_name=safe_program_name,
+            program_name=safe_program_name,
+            config_name=safe_file_name,
+            baseline_content=data.baseline_content or "",
+            parse_warnings=tuple(data.parse_warnings),
+        )
+
+    @staticmethod
+    def _build_write_params(
+        data: SupervisorRegistryCreateData,
+        operator_id: int,
+        operator_name: str,
+        remark: str,
+    ) -> tuple[object, ...]:
+        return (
+            data.host_ip,
+            data.job_name,
+            data.module_name,
+            data.program_name,
+            data.config_name,
+            data.config_path,
+            data.file_name,
+            data.content_program_name,
+            data.manage_mode,
+            data.baseline_content,
+            int(data.metadata_complete),
+            SupervisorRegistryService._serialize_parse_warnings(data.parse_warnings),
+            data.java_path,
+            data.active_profile,
+            data.port,
+            data.jar_name,
+            data.xms,
+            data.xmx,
+            data.run_user,
+            operator_id,
+            operator_name,
+            operator_id,
+            operator_name,
+            remark,
+        )
+
+    @staticmethod
+    def _serialize_parse_warnings(parse_warnings: tuple[str, ...]) -> str:
+        return json.dumps(list(parse_warnings), ensure_ascii=False)
+
+    @staticmethod
+    def _deserialize_parse_warnings(value: object) -> tuple[str, ...]:
+        if value in (None, ""):
+            return ()
+        try:
+            raw_list = json.loads(str(value))
+        except json.JSONDecodeError:
+            return (str(value),)
+        if not isinstance(raw_list, list):
+            return (str(value),)
+        return tuple(str(item) for item in raw_list)
+
+    def _build_record_from_data(self, record_id: int, data: SupervisorRegistryCreateData) -> SupervisorRegistryRecord:
         return SupervisorRegistryRecord(
             id=record_id,
             host_ip=data.host_ip,
+            config_path=data.config_path,
+            file_name=data.file_name,
+            content_program_name=data.content_program_name,
+            manage_mode=data.manage_mode,
+            baseline_content=data.baseline_content,
+            metadata_complete=bool(data.metadata_complete),
+            parse_warnings=tuple(data.parse_warnings),
             job_name=data.job_name,
             module_name=data.module_name,
-            program_name=data.program_name,
-            config_name=data.config_name,
+            program_name=str(data.program_name),
+            config_name=str(data.config_name),
             java_path=data.java_path,
             active_profile=data.active_profile,
             port=data.port,
@@ -169,20 +397,32 @@ class SupervisorRegistryService:
             run_user=data.run_user,
         )
 
-    @staticmethod
-    def _build_record(row: dict[str, object]) -> SupervisorRegistryRecord:
+    def _build_record(self, row: dict[str, object]) -> SupervisorRegistryRecord:
         return SupervisorRegistryRecord(
             id=int(row["id"]),
             host_ip=str(row["host_ip"]),
-            job_name=str(row["job_name"]),
-            module_name=str(row["module_name"]),
+            config_path=str(row["config_path"]),
+            file_name=str(row["file_name"]),
+            content_program_name=str(row["content_program_name"]),
+            manage_mode=str(row["manage_mode"]),
+            baseline_content=str(row["baseline_content"] or ""),
+            metadata_complete=bool(row["metadata_complete"]),
+            parse_warnings=self._deserialize_parse_warnings(row["parse_warnings"]),
+            job_name=self._to_optional_str(row["job_name"]),
+            module_name=self._to_optional_str(row["module_name"]),
             program_name=str(row["program_name"]),
             config_name=str(row["config_name"]),
-            java_path=str(row["java_path"]),
-            active_profile=str(row["active_profile"]),
-            port=int(row["port"]),
-            jar_name=str(row["jar_name"]),
-            xms=str(row["xms"]),
-            xmx=str(row["xmx"]),
-            run_user=str(row["run_user"]),
+            java_path=self._to_optional_str(row["java_path"]),
+            active_profile=self._to_optional_str(row["active_profile"]),
+            port=int(row["port"]) if row["port"] is not None else None,
+            jar_name=self._to_optional_str(row["jar_name"]),
+            xms=self._to_optional_str(row["xms"]),
+            xmx=self._to_optional_str(row["xmx"]),
+            run_user=self._to_optional_str(row["run_user"]),
         )
+
+    @staticmethod
+    def _to_optional_str(value: object) -> str | None:
+        if value in (None, ""):
+            return None
+        return str(value)

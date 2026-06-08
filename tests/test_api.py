@@ -68,6 +68,13 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert create_response.status_code == 200
     create_data = create_response.json()["data"]
     assert create_data["programName"] == "demo-project_member"
+    assert create_data["configName"] == "demo-project_member.ini"
+    assert create_data["configPath"] == "demo-project_member.ini"
+    assert create_data["fileName"] == "demo-project_member.ini"
+    assert create_data["contentProgramName"] == "demo-project_member"
+    assert create_data["manageMode"] == "TEMPLATE_MANAGED"
+    assert create_data["metadataComplete"] is True
+    assert create_data["parseWarnings"] == []
     assert create_data["fileState"] == "MATCH"
     assert create_data["status"]["state"] == "STOPPED"
     assert (conf_dir / "demo-project_member.ini").exists()
@@ -78,6 +85,7 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     list_data = list_response.json()["data"]
     assert len(list_data) == 1
     assert list_data[0]["programName"] == "demo-project_member"
+    assert list_data[0]["configPath"] == "demo-project_member.ini"
     assert list_data[0]["fileState"] == "MATCH"
     assert list_data[0]["status"]["state"] == "STOPPED"
 
@@ -91,6 +99,9 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert detail_data["id"] == create_data["id"]
     assert detail_data["jobName"] == "demo-project"
     assert detail_data["moduleName"] == "member"
+    assert detail_data["configPath"] == "demo-project_member.ini"
+    assert detail_data["fileName"] == "demo-project_member.ini"
+    assert detail_data["contentProgramName"] == "demo-project_member"
     assert detail_data["fileState"] == "MATCH"
     assert "[program:demo-project_member]" in detail_data["expectedContent"]
 
@@ -148,6 +159,62 @@ def test_api_reports_remote_content_mismatch(client, test_environment, seed_user
     assert "9010" in detail_data["remoteContent"]
 
 
+def test_api_imported_readonly_detail_uses_baseline_content(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    baseline_content = (
+        "[program:legacy_sjfy-admin]\n"
+        "command=/usr/local/jdk17/bin/java -jar -Xms256m -Xmx512m "
+        "-Dspring.profiles.active=prod -Dserver.port=9200 /data/content/legacy/sjfy-admin.jar\n"
+        "directory=/data/content/legacy\n"
+        "stdout_logfile_maxbytes=50MB\n"
+        "stdout_logfile_maxbytes=1GB\n"
+    )
+    (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="legacy",
+        module_name="sjfy-admin",
+        program_name="legacy_sjfy-admin",
+        config_name="legacy-name.ini",
+        config_path="saas/legacy-name.ini",
+        file_name="legacy-name.ini",
+        content_program_name="legacy_sjfy-admin",
+        manage_mode="IMPORTED_READONLY",
+        baseline_content=baseline_content,
+        metadata_complete=False,
+        parse_warnings='["section[program:legacy_sjfy-admin] 存在重复 key: stdout_logfile_maxbytes，已按最后一个值生效"]',
+        java_path="/usr/local/jdk17/bin/java",
+        active_profile="prod",
+        port=9200,
+        jar_name="sjfy-admin.jar",
+        xms="256m",
+        xmx="512m",
+        run_user=None,
+    )
+
+    response = client.get(
+        "/admin/api/supervisor/services/legacy_sjfy-admin",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    detail_data = response.json()["data"]
+    assert detail_data["configName"] == "legacy-name.ini"
+    assert detail_data["configPath"] == "saas/legacy-name.ini"
+    assert detail_data["fileName"] == "legacy-name.ini"
+    assert detail_data["contentProgramName"] == "legacy_sjfy-admin"
+    assert detail_data["manageMode"] == "IMPORTED_READONLY"
+    assert detail_data["metadataComplete"] is False
+    assert len(detail_data["parseWarnings"]) == 1
+    assert detail_data["expectedContent"] == baseline_content
+    assert detail_data["fileState"] == "MATCH"
+
+
 def test_api_rejects_duplicate_registry_record_before_remote_write(client, test_environment, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
@@ -193,6 +260,18 @@ def test_api_rejects_invalid_config_name(client, seed_user):
     assert response.status_code == 400
     assert response.json()["code"] == 40002
     assert response.json()["data"] is None
+
+
+def test_api_rejects_remote_service_creation(client, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.post("/admin/api/supervisor/services", json=_payload("10.1.0.104"), headers=headers)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40300
+    assert response.json()["msg"] == "当前项目禁止修改远端配置文件"
+    assert fake_mysql.tables["sys_supervisor_service"] == []
 
 
 def test_api_rejects_removed_supervisor_template_fields(client, seed_user):

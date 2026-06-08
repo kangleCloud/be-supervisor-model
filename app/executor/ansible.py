@@ -65,35 +65,61 @@ class AnsibleExecutor(RemoteExecutor):
         stderr = (proc.stderr or "").strip()
         return CommandResult(tuple(command), proc.returncode, stdout, stderr)
 
-    def run_command(self, command: Sequence[str], timeout: int | None = None) -> CommandResult:
-        return self._run_ansible("shell", shlex.join(list(command)), timeout=timeout)
+    @staticmethod
+    def _split_payload_lines(payload: str) -> list[str]:
+        """兼容 oneline 回调把多行 stdout 折叠成 \n 文本的场景。"""
+        normalized = payload.replace("\\n", "\n").replace("\\r", "\r")
+        return [line.strip() for line in normalized.splitlines() if line.strip()]
 
-    def list_configs(self, conf_dir: Path) -> list[Path]:
-        quoted_dir = shlex.quote(str(conf_dir))
-        shell_command = (
-            f"find {quoted_dir} -maxdepth 1 -type f "
-            "\\( -name '*.ini' -o -name '*.ini.bak' -o -name '*.ini.bak.*' \\) -print | sort"
+    def _extract_stdout_lines(self, stdout: str) -> list[str]:
+        """提取 ansible oneline 输出中的真实 stdout 负载，避免把主机前缀误当成业务内容。"""
+        payload_lines: list[str] = []
+        for raw_line in stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            match = _RESULT_LINE_PATTERN.match(line)
+            if match is None:
+                payload_lines.extend(self._split_payload_lines(line))
+                continue
+
+            rest = match.group("rest").strip()
+            if rest.startswith(">>"):
+                payload_lines.extend(self._split_payload_lines(rest[2:].strip()))
+                continue
+            if "(stdout)" in rest:
+                payload_lines.extend(self._split_payload_lines(rest.split("(stdout)", 1)[1].strip()))
+                continue
+
+        return payload_lines
+
+    def run_command(self, command: Sequence[str], timeout: int | None = None) -> CommandResult:
+        result = self._run_ansible("shell", shlex.join(list(command)), timeout=timeout)
+        return CommandResult(
+            result.args,
+            result.exit_code,
+            "\n".join(self._extract_stdout_lines(result.stdout)),
+            result.stderr,
         )
+
+    def list_configs(self, conf_dir: Path, *, recursive: bool = False, include_backups: bool = True) -> list[Path]:
+        quoted_dir = shlex.quote(str(conf_dir))
+        name_parts = ["-name '*.ini'"]
+        if include_backups:
+            name_parts.extend(["-o -name '*.ini.bak'", "-o -name '*.ini.bak.*'"])
+        maxdepth_part = "" if recursive else "-maxdepth 1 "
+        shell_command = f"find {quoted_dir} {maxdepth_part}-type f \\( {' '.join(name_parts)} \\) -print"
         result = self._run_ansible("shell", shell_command)
         if not result.success:
             raise ExecutorRuntimeError(result.stderr or result.stdout or "列出配置文件失败")
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        paths = []
-        for line in lines:
-            if line.startswith(self.host.ip) and ">>" in line:
-                line = line.split(">>", 1)[1].strip()
-            if _RESULT_LINE_PATTERN.match(line):
-                continue
-            paths.append(Path(line))
-        return paths
+        return [Path(line) for line in sorted(self._extract_stdout_lines(result.stdout))]
 
     def read_text(self, path: Path) -> str:
         result = self._run_ansible("shell", f"cat {shlex.quote(str(path))}")
         if not result.success:
             raise ExecutorRuntimeError(result.stderr or result.stdout or "读取远程文件失败")
-        if ">>" in result.stdout:
-            return result.stdout.split(">>", 1)[1].strip()
-        return result.stdout
+        return "\n".join(self._extract_stdout_lines(result.stdout))
 
     def write_text_atomic(self, path: Path, content: str) -> None:
         remote_temp = f"{path}.tmp-{uuid.uuid4().hex}"
@@ -134,4 +160,6 @@ class AnsibleExecutor(RemoteExecutor):
 
     def path_exists(self, path: Path) -> bool:
         result = self._run_ansible("shell", f"test -e {shlex.quote(str(path))}")
+        if result.exit_code not in {0, 1}:
+            raise ExecutorRuntimeError(result.stderr or result.stdout or "检查远程路径失败")
         return result.success

@@ -36,8 +36,9 @@ class PortCheckService:
         """查找端口冲突。"""
         normalized_exclude = normalize_config_name(exclude_config, exclude_config) if exclude_config else None
         conflicts: list[PortConflict] = []
-        for record in self.config_file_service.list_raw_configs(host, include_backups=True):
-            if normalized_exclude and self._should_skip(record.config_name, normalized_exclude):
+        # 端口扫描必须覆盖子目录和备份文件，否则初始化导入后的现场冲突会被漏掉。
+        for record in self.config_file_service.list_raw_configs(host, include_backups=True, recursive=True):
+            if normalized_exclude and self._should_skip(record.file_name, normalized_exclude):
                 continue
             for match in PORT_PATTERN.finditer(record.content):
                 current_port = int(match.group("port"))
@@ -45,7 +46,7 @@ class PortCheckService:
                     conflicts.append(
                         PortConflict(
                             file_path=record.path,
-                            program_name=self._extract_program_name(record.content, record.config_name),
+                            program_name=self._extract_program_name(record.content, record.file_name),
                             port=current_port,
                         )
                     )
@@ -68,4 +69,4 @@ class PortCheckService:
         match = PROGRAM_PATTERN.search(content)
         if match is None:
             return default_name
-        return match.group("name")
+        return match.group("name").strip()

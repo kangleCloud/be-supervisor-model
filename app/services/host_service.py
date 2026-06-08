@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.core.config import HostConfig, Settings
-from app.core.exceptions import InvalidHostError
+from app.core.exceptions import ForbiddenOperationError, InvalidHostError
 from app.core.security import ensure_safe_host
 from app.executor.ansible import AnsibleExecutor
 from app.executor.base import RemoteExecutor
@@ -37,6 +37,13 @@ class HostService:
                     raise InvalidHostError("目标主机已被禁用")
                 return host
         raise InvalidHostError()
+
+    def ensure_mutation_allowed(self, host_value: str, forbidden_msg: str) -> HostConfig:
+        """当前项目约束：远端 ansible 主机只允许读，不允许通过服务端改现场。"""
+        host = self.get_host(host_value)
+        if host.executor_type == "ansible":
+            raise ForbiddenOperationError(forbidden_msg)
+        return host
 
     def get_executor(self, host_value: str) -> RemoteExecutor:
         """按主机配置创建执行器。"""

@@ -9,6 +9,8 @@ from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.port_check_service import PortCheckService
 from app.services.supervisor_registry_service import (
+    MANAGE_MODE_IMPORTED_READONLY,
+    MANAGE_MODE_TEMPLATE_MANAGED,
     SupervisorRegistryCreateData,
     SupervisorRegistryRecord,
     SupervisorRegistryService,
@@ -68,7 +70,7 @@ class SupervisorManager:
         self.host_service.get_host(host)
         record = self.registry_service.get_by_program_name(host, program_name)
         expected_content = self._render_expected_content(record)
-        remote_config = self.config_file_service.read_raw_config_optional(host, record.config_name, record.program_name)
+        remote_config = self.config_file_service.read_raw_config_optional_by_config_path(host, record.config_path)
         status_entries = self.supervisor_service.status(host, record.program_name)
         status = status_entries[0].to_dict() if status_entries else None
         file_state = self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
@@ -80,7 +82,8 @@ class SupervisorManager:
 
     def create_service(self, payload: ServiceCreateRequest, current_user) -> dict[str, object]:
         """新增服务并在远端和数据库中同步落地。"""
-        self.host_service.get_host(payload.host)
+        # 当前项目已收紧约束：远端 ansible 主机只允许读，新增只能发生在 local 主机。
+        self.host_service.ensure_mutation_allowed(payload.host, "当前项目禁止修改远端配置文件")
         rendered = self.template_service.render(payload)
         registry_data = SupervisorRegistryCreateData(
             host_ip=payload.host,
@@ -88,6 +91,13 @@ class SupervisorManager:
             module_name=payload.module_name,
             program_name=rendered.program_name,
             config_name=rendered.config_name,
+            config_path=rendered.config_name,
+            file_name=rendered.config_name,
+            content_program_name=rendered.program_name,
+            manage_mode=MANAGE_MODE_TEMPLATE_MANAGED,
+            baseline_content=rendered.content,
+            metadata_complete=True,
+            parse_warnings=(),
             java_path=payload.java_path,
             active_profile=payload.active,
             port=payload.port,
@@ -123,23 +133,42 @@ class SupervisorManager:
         return self._build_service_payload(record, status=status, file_state=FILE_STATE_MATCH)
 
     def _render_expected_content(self, record: SupervisorRegistryRecord) -> str:
-        """数据库字段是主数据，详情和漂移判断都以此渲染期望配置。"""
+        """详情与漂移判断要区分模板纳管与只读导入快照。"""
+        if record.manage_mode == MANAGE_MODE_IMPORTED_READONLY:
+            return record.baseline_content
+
+        if any(
+            value in (None, "")
+            for value in (
+                record.job_name,
+                record.module_name,
+                record.java_path,
+                record.active_profile,
+                record.port,
+                record.jar_name,
+                record.xms,
+                record.xmx,
+                record.run_user,
+            )
+        ):
+            return record.baseline_content
+
         rendered = self.template_service.render_service(
-            job_name=record.job_name,
-            module_name=record.module_name,
-            java_path=record.java_path,
-            active=record.active_profile,
-            port=record.port,
-            jar_name=record.jar_name,
+            job_name=str(record.job_name),
+            module_name=str(record.module_name),
+            java_path=str(record.java_path),
+            active=str(record.active_profile),
+            port=int(record.port),
+            jar_name=str(record.jar_name),
             config_name=record.config_name,
-            xms=record.xms,
-            xmx=record.xmx,
-            user=record.run_user,
+            xms=str(record.xms),
+            xmx=str(record.xmx),
+            user=str(record.run_user),
         )
         return rendered.content
 
     def _detect_file_state(self, host: str, record: SupervisorRegistryRecord, expected_content: str) -> str:
-        remote_config = self.config_file_service.read_raw_config_optional(host, record.config_name, record.program_name)
+        remote_config = self.config_file_service.read_raw_config_optional_by_config_path(host, record.config_path)
         return self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
 
     @staticmethod
@@ -181,6 +210,12 @@ class SupervisorManager:
             "moduleName": record.module_name,
             "programName": record.program_name,
             "configName": record.config_name,
+            "configPath": record.config_path,
+            "fileName": record.file_name,
+            "contentProgramName": record.content_program_name,
+            "manageMode": record.manage_mode,
+            "metadataComplete": record.metadata_complete,
+            "parseWarnings": list(record.parse_warnings),
             "javaPath": record.java_path,
             "active": record.active_profile,
             "port": record.port,

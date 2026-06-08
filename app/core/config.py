@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import os.path
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -205,7 +206,8 @@ def _optional_path(
     path = Path(raw_value).expanduser()
     if not path.is_absolute():
         raise ValueError(f"{env_key} 必须是绝对路径")
-    return path.resolve()
+    # 这里保留配置字面路径，只做词法归一化，避免 macOS 把 /etc 解析成 /private/etc 后污染远端路径语义。
+    return Path(os.path.normpath(str(path)))
 
 
 def _load_hosts(config_data: Mapping[str, Any], default_executor_type: str) -> tuple[HostConfig, ...]:

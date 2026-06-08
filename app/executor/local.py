@@ -29,13 +29,16 @@ class LocalExecutor(RemoteExecutor):
 
         return CommandResult(tuple(command), proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip())
 
-    def list_configs(self, conf_dir: Path) -> list[Path]:
+    def list_configs(self, conf_dir: Path, *, recursive: bool = False, include_backups: bool = True) -> list[Path]:
         if not conf_dir.exists():
             return []
-        paths = list(conf_dir.glob("*.ini"))
-        paths.extend(conf_dir.glob("*.ini.bak"))
-        paths.extend(conf_dir.glob("*.ini.bak.*"))
-        return sorted(path.resolve() for path in paths if path.is_file())
+
+        globber = conf_dir.rglob if recursive else conf_dir.glob
+        paths = list(globber("*.ini"))
+        if include_backups:
+            paths.extend(globber("*.ini.bak"))
+            paths.extend(globber("*.ini.bak.*"))
+        return sorted(path for path in paths if path.is_file())
 
     def read_text(self, path: Path) -> str:
         return path.read_text(encoding="utf-8")

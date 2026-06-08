@@ -10,10 +10,12 @@ from app.services.template_service import TemplateService
 def test_port_check_scans_backups_and_excludes_current(settings, test_environment):
     conf_dir = test_environment["conf_dir"]
     build_ini = test_environment["build_ini"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
 
     (conf_dir / "demo_member.ini").write_text(build_ini("demo_member", 9001), encoding="utf-8")
     (conf_dir / "demo_member.ini.bak").write_text(build_ini("demo_member", 9001), encoding="utf-8")
-    (conf_dir / "other_member.ini.bak.20260602-153000").write_text(build_ini("other_member", 9001), encoding="utf-8")
+    (sub_dir / "other_member.ini.bak.20260602-153000").write_text(build_ini("other_member", 9001), encoding="utf-8")
 
     host_service = HostService(settings)
     template_service = TemplateService(settings)

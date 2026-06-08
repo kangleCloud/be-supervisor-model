@@ -1,6 +1,7 @@
 """输入安全校验。"""
 from __future__ import annotations
 
+import os.path
 import re
 from pathlib import Path
 from typing import Optional
@@ -68,13 +69,54 @@ def normalize_config_name(config_name: str, program_name: Optional[str] = None) 
     return f"{raw_value}.ini"
 
 
+def normalize_config_path(config_path: str, *, allow_backups: bool = False) -> str:
+    """规范化相对配置路径，允许子目录但禁止穿越。"""
+    raw_value = (config_path or "").replace("\\", "/").strip().strip("/")
+    if not raw_value:
+        raise InvalidConfigNameError("configPath 不能为空")
+
+    normalized = os.path.normpath(raw_value).replace("\\", "/").strip("/")
+    if not normalized or normalized == ".":
+        raise InvalidConfigNameError("configPath 不能为空")
+
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise InvalidConfigNameError("configPath 不允许包含路径穿越")
+
+    for part in parts[:-1]:
+        ensure_safe_name(part, "configPath")
+
+    file_name = parts[-1]
+    if allow_backups:
+        if not (
+            file_name.endswith(".ini")
+            or file_name.endswith(".ini.bak")
+            or ".ini.bak." in file_name
+        ):
+            raise InvalidConfigNameError("configPath 只允许 .ini 或备份文件")
+        base_name = file_name.split(".ini", 1)[0]
+        ensure_safe_name(base_name, "configPath")
+        return normalized
+
+    if not file_name.endswith(".ini"):
+        raise InvalidConfigNameError("configPath 只允许 .ini 文件")
+    if file_name.endswith(".bak") or ".bak." in file_name:
+        raise InvalidConfigNameError("configPath 不允许使用备份文件名")
+
+    ensure_safe_name(file_name[:-4], "configPath")
+    return normalized
+
+
 def ensure_safe_path_under_dir(base_dir: Path, target: Path) -> Path:
     """确保目标路径仍位于允许目录内。"""
-    base_resolved = base_dir.resolve()
-    target_resolved = target.resolve()
-    if base_resolved not in target_resolved.parents and target_resolved != base_resolved:
+    # 这里不能依赖 resolve()，否则控制机上的 /etc 会被折叠成 /private/etc，破坏远端 Linux 的路径语义。
+    base_normalized = Path(os.path.normpath(str(base_dir)))
+    target_normalized = Path(os.path.normpath(str(target)))
+    if not base_normalized.is_absolute() or not target_normalized.is_absolute():
+        raise InvalidConfigNameError("目标路径必须是绝对路径")
+    if base_normalized not in target_normalized.parents and target_normalized != base_normalized:
         raise InvalidConfigNameError("目标路径超出允许目录")
-    return target_resolved
+    return target_normalized
 
 
 def ensure_valid_port(port: int) -> int:

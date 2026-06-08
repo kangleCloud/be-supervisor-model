@@ -48,7 +48,7 @@ class FakeSupervisorCtl:
 
     def _current_programs(self) -> list[str]:
         programs: list[str] = []
-        for path in sorted(self.conf_dir.glob("*.ini")):
+        for path in sorted(self.conf_dir.rglob("*.ini")):
             content = path.read_text(encoding="utf-8")
             match = PROGRAM_PATTERN.search(content)
             if match:
@@ -223,43 +223,130 @@ class FakeMySQLServer:
         self,
         *,
         host_ip: str,
-        job_name: str,
-        module_name: str,
+        job_name: str | None,
+        module_name: str | None,
         program_name: str,
         config_name: str,
-        java_path: str,
-        active_profile: str,
-        port: int,
-        jar_name: str,
-        xms: str,
-        xmx: str,
-        run_user: str,
+        config_path: str | None = None,
+        file_name: str | None = None,
+        content_program_name: str | None = None,
+        manage_mode: str = "TEMPLATE_MANAGED",
+        baseline_content: str = "",
+        metadata_complete: bool = True,
+        parse_warnings: str = "[]",
+        java_path: str | None = None,
+        active_profile: str | None = None,
+        port: int | None = None,
+        jar_name: str | None = None,
+        xms: str | None = None,
+        xmx: str | None = None,
+        run_user: str | None = None,
     ) -> None:
         self.tables.setdefault("sys_supervisor_service", [])
         record_id = self.auto_increment["sys_supervisor_service"]
         self.auto_increment["sys_supervisor_service"] += 1
         self.tables["sys_supervisor_service"].append(
-            {
-                "id": record_id,
-                "host_ip": host_ip,
-                "job_name": job_name,
-                "module_name": module_name,
-                "program_name": program_name,
-                "config_name": config_name,
-                "java_path": java_path,
-                "active_profile": active_profile,
-                "port": port,
-                "jar_name": jar_name,
-                "xms": xms,
-                "xmx": xmx,
-                "run_user": run_user,
-                "create_by_id": 0,
-                "create_by": "system",
-                "update_by_id": 0,
-                "update_by": "system",
-                "remark": "测试服务",
-            }
+            self._build_supervisor_row(
+                record_id=record_id,
+                host_ip=host_ip,
+                job_name=job_name,
+                module_name=module_name,
+                program_name=program_name,
+                config_name=config_name,
+                config_path=config_path or config_name,
+                file_name=file_name or config_name,
+                content_program_name=content_program_name or program_name,
+                manage_mode=manage_mode,
+                baseline_content=baseline_content,
+                metadata_complete=metadata_complete,
+                parse_warnings=parse_warnings,
+                java_path=java_path,
+                active_profile=active_profile,
+                port=port,
+                jar_name=jar_name,
+                xms=xms,
+                xmx=xmx,
+                run_user=run_user,
+                create_by_id=0,
+                create_by="system",
+                update_by_id=0,
+                update_by="system",
+                remark="测试服务",
+            )
         )
+
+    def _build_supervisor_row(
+        self,
+        *,
+        record_id: int,
+        host_ip: str,
+        job_name: str | None,
+        module_name: str | None,
+        program_name: str,
+        config_name: str,
+        config_path: str,
+        file_name: str,
+        content_program_name: str,
+        manage_mode: str,
+        baseline_content: str,
+        metadata_complete: bool,
+        parse_warnings: str,
+        java_path: str | None,
+        active_profile: str | None,
+        port: int | None,
+        jar_name: str | None,
+        xms: str | None,
+        xmx: str | None,
+        run_user: str | None,
+        create_by_id: int,
+        create_by: str,
+        update_by_id: int,
+        update_by: str,
+        remark: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": record_id,
+            "host_ip": host_ip,
+            "job_name": job_name,
+            "module_name": module_name,
+            "program_name": program_name,
+            "config_name": config_name,
+            "config_path": config_path,
+            "file_name": file_name,
+            "content_program_name": content_program_name,
+            "manage_mode": manage_mode,
+            "baseline_content": baseline_content,
+            "metadata_complete": 1 if metadata_complete else 0,
+            "parse_warnings": parse_warnings,
+            "java_path": java_path,
+            "active_profile": active_profile,
+            "port": port,
+            "jar_name": jar_name,
+            "xms": xms,
+            "xmx": xmx,
+            "run_user": run_user,
+            "create_by_id": create_by_id,
+            "create_by": create_by,
+            "update_by_id": update_by_id,
+            "update_by": update_by,
+            "remark": remark,
+        }
+
+    @staticmethod
+    def _hydrate_supervisor_defaults(row: dict[str, Any]) -> dict[str, Any]:
+        row.setdefault("config_path", row.get("config_name"))
+        row.setdefault("file_name", row.get("config_name"))
+        row.setdefault("content_program_name", row.get("program_name"))
+        row.setdefault("manage_mode", "TEMPLATE_MANAGED")
+        row.setdefault("baseline_content", "")
+        row.setdefault("metadata_complete", 1)
+        row.setdefault("parse_warnings", "[]")
+        row.setdefault("create_by_id", 0)
+        row.setdefault("create_by", "system")
+        row.setdefault("update_by_id", 0)
+        row.setdefault("update_by", "system")
+        row.setdefault("remark", "测试服务")
+        return row
 
     def execute(self, query: str, params: tuple[Any, ...], cursor: FakeMySQLCursor) -> int:
         normalized = " ".join(query.strip().split())
@@ -274,6 +361,11 @@ class FakeMySQLServer:
         if normalized.startswith("CREATE TABLE IF NOT EXISTS"):
             table_name = normalized.split("`")[1] if "`" in normalized else normalized.split()[5]
             self.tables.setdefault(table_name, [])
+            return 1
+
+        if normalized.startswith("ALTER TABLE `sys_supervisor_service`"):
+            for row in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(row)
             return 1
 
         if normalized == "SHOW TABLES LIKE %s":
@@ -439,9 +531,27 @@ class FakeMySQLServer:
             cursor.lastrowid = log_id
             return 1
 
+        if normalized.startswith("UPDATE `sys_supervisor_service` SET `config_path` = IFNULL(`config_path`, `config_name`)"):
+            for row in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(row)
+                row["config_path"] = row.get("config_path") or row.get("config_name")
+                row["file_name"] = row.get("file_name") or row.get("config_name")
+                row["content_program_name"] = row.get("content_program_name") or row.get("program_name")
+                row["program_name"] = row.get("program_name") or row.get("content_program_name")
+                row["config_name"] = row.get("config_name") or row.get("file_name")
+                row["manage_mode"] = row.get("manage_mode") or "TEMPLATE_MANAGED"
+                row["baseline_content"] = row.get("baseline_content") or ""
+                row["metadata_complete"] = row.get("metadata_complete") if row.get("metadata_complete") is not None else 1
+                row["parse_warnings"] = row.get("parse_warnings") or "[]"
+            return len(self.tables.get("sys_supervisor_service", []))
+
         if "FROM sys_supervisor_service WHERE host_ip = %s ORDER BY id ASC" in normalized:
             host_ip = str(params[0])
-            rows = [item for item in self.tables.get("sys_supervisor_service", []) if item["host_ip"] == host_ip]
+            rows = []
+            for item in self.tables.get("sys_supervisor_service", []):
+                if item["host_ip"] != host_ip:
+                    continue
+                rows.append(dict(self._hydrate_supervisor_defaults(item)))
             cursor.results = [dict(item) for item in rows]
             return len(cursor.results)
 
@@ -450,9 +560,23 @@ class FakeMySQLServer:
             program_name = str(params[1])
             row = next(
                 (
-                    item
+                    dict(self._hydrate_supervisor_defaults(item))
                     for item in self.tables.get("sys_supervisor_service", [])
                     if item["host_ip"] == host_ip and item["program_name"] == program_name
+                ),
+                None,
+            )
+            cursor.results = [dict(row)] if row else []
+            return len(cursor.results)
+
+        if "FROM sys_supervisor_service WHERE host_ip = %s AND config_path = %s LIMIT 1" in normalized:
+            host_ip = str(params[0])
+            config_path = str(params[1])
+            row = next(
+                (
+                    dict(self._hydrate_supervisor_defaults(item))
+                    for item in self.tables.get("sys_supervisor_service", [])
+                    if item["host_ip"] == host_ip and item["config_path"] == config_path
                 ),
                 None,
             )
@@ -467,43 +591,82 @@ class FakeMySQLServer:
             host_ip = str(params[0])
             program_name = str(params[3])
             config_name = str(params[4])
-            port = int(params[7])
+            config_path = str(params[5])
+            port = int(params[14]) if params[14] is not None else None
             for item in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(item)
                 if item["host_ip"] != host_ip:
                     continue
                 if item["program_name"] == program_name:
                     raise RuntimeError("duplicate program_name")
-                if item["config_name"] == config_name:
-                    raise RuntimeError("duplicate config_name")
-                if int(item["port"]) == port:
+                if item["config_path"] == config_path:
+                    raise RuntimeError("duplicate config_path")
+                if port is not None and item["port"] is not None and int(item["port"]) == port:
                     raise RuntimeError("duplicate port")
 
             record_id = self.auto_increment["sys_supervisor_service"]
             self.auto_increment["sys_supervisor_service"] += 1
             self.tables.setdefault("sys_supervisor_service", []).append(
-                {
-                    "id": record_id,
-                    "host_ip": host_ip,
-                    "job_name": str(params[1]),
-                    "module_name": str(params[2]),
-                    "program_name": program_name,
-                    "config_name": config_name,
-                    "java_path": str(params[5]),
-                    "active_profile": str(params[6]),
-                    "port": port,
-                    "jar_name": str(params[8]),
-                    "xms": str(params[9]),
-                    "xmx": str(params[10]),
-                    "run_user": str(params[11]),
-                    "create_by_id": params[12],
-                    "create_by": params[13],
-                    "update_by_id": params[14],
-                    "update_by": params[15],
-                    "remark": params[16],
-                }
+                self._build_supervisor_row(
+                    record_id=record_id,
+                    host_ip=host_ip,
+                    job_name=str(params[1]) if params[1] is not None else None,
+                    module_name=str(params[2]) if params[2] is not None else None,
+                    program_name=program_name,
+                    config_name=config_name,
+                    config_path=config_path,
+                    file_name=str(params[6]),
+                    content_program_name=str(params[7]),
+                    manage_mode=str(params[8]),
+                    baseline_content=str(params[9]),
+                    metadata_complete=bool(params[10]),
+                    parse_warnings=str(params[11]),
+                    java_path=str(params[12]) if params[12] is not None else None,
+                    active_profile=str(params[13]) if params[13] is not None else None,
+                    port=port,
+                    jar_name=str(params[15]) if params[15] is not None else None,
+                    xms=str(params[16]) if params[16] is not None else None,
+                    xmx=str(params[17]) if params[17] is not None else None,
+                    run_user=str(params[18]) if params[18] is not None else None,
+                    create_by_id=int(params[19]),
+                    create_by=str(params[20]),
+                    update_by_id=int(params[21]),
+                    update_by=str(params[22]),
+                    remark=str(params[23]),
+                )
             )
             cursor.lastrowid = record_id
             return 1
+
+        if normalized.startswith("UPDATE sys_supervisor_service SET job_name = %s,"):
+            record_id = int(params[-1])
+            for item in self.tables.get("sys_supervisor_service", []):
+                if int(item["id"]) != record_id:
+                    continue
+                self._hydrate_supervisor_defaults(item)
+                item["job_name"] = str(params[0]) if params[0] is not None else None
+                item["module_name"] = str(params[1]) if params[1] is not None else None
+                item["program_name"] = str(params[2])
+                item["config_name"] = str(params[3])
+                item["config_path"] = str(params[4])
+                item["file_name"] = str(params[5])
+                item["content_program_name"] = str(params[6])
+                item["manage_mode"] = str(params[7])
+                item["baseline_content"] = str(params[8])
+                item["metadata_complete"] = int(params[9])
+                item["parse_warnings"] = str(params[10])
+                item["java_path"] = str(params[11]) if params[11] is not None else None
+                item["active_profile"] = str(params[12]) if params[12] is not None else None
+                item["port"] = int(params[13]) if params[13] is not None else None
+                item["jar_name"] = str(params[14]) if params[14] is not None else None
+                item["xms"] = str(params[15]) if params[15] is not None else None
+                item["xmx"] = str(params[16]) if params[16] is not None else None
+                item["run_user"] = str(params[17]) if params[17] is not None else None
+                item["update_by_id"] = int(params[18])
+                item["update_by"] = str(params[19])
+                item["remark"] = str(params[20])
+                return 1
+            return 0
 
         raise AssertionError(f"Unsupported SQL: {normalized}")
 

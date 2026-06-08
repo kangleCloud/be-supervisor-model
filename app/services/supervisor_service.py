@@ -31,6 +31,10 @@ class SupervisorService:
     def __init__(self, host_service: HostService):
         self.host_service = host_service
 
+    def _ensure_remote_command_allowed(self, host: str) -> None:
+        """远端主机当前只允许查状态，不允许触发生效或启停命令。"""
+        self.host_service.ensure_mutation_allowed(host, "当前项目禁止操作远端 Supervisor")
+
     def status(self, host: str, program_name: Optional[str] = None) -> list[SupervisorStatus]:
         """查询服务状态。"""
         command = ["supervisorctl", "status"]
@@ -41,11 +45,13 @@ class SupervisorService:
 
     def start(self, host: str, program_name: str) -> dict[str, object]:
         """启动服务。"""
+        self._ensure_remote_command_allowed(host)
         result = self._run(host, ["supervisorctl", "start", ensure_safe_program_name(program_name)])
         return self._command_result_payload(result)
 
     def stop(self, host: str, program_name: str, allow_not_running: bool = False) -> dict[str, object]:
         """停止服务。"""
+        self._ensure_remote_command_allowed(host)
         result = self._run(
             host,
             ["supervisorctl", "stop", ensure_safe_program_name(program_name)],
@@ -61,16 +67,19 @@ class SupervisorService:
 
     def restart(self, host: str, program_name: str) -> dict[str, object]:
         """重启服务。"""
+        self._ensure_remote_command_allowed(host)
         result = self._run(host, ["supervisorctl", "restart", ensure_safe_program_name(program_name)])
         return self._command_result_payload(result)
 
     def reread(self, host: str) -> dict[str, object]:
         """执行 reread。"""
+        self._ensure_remote_command_allowed(host)
         result = self._run(host, ["supervisorctl", "reread"])
         return self._command_result_payload(result)
 
     def update(self, host: str) -> dict[str, object]:
         """执行 update。"""
+        self._ensure_remote_command_allowed(host)
         result = self._run(host, ["supervisorctl", "update"])
         return self._command_result_payload(result)
 

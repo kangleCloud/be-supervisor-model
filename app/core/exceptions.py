@@ -29,6 +29,13 @@ class UnauthorizedError(AppError):
         super().__init__(401, 40100, msg, data)
 
 
+class ForbiddenOperationError(AppError):
+    """当前环境禁止执行的业务操作。"""
+
+    def __init__(self, msg: str, data: Any = None):
+        super().__init__(403, 40300, msg, data)
+
+
 class InvalidHostError(AppError):
     """非法目标主机。"""
 

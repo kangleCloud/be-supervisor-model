@@ -157,6 +157,28 @@ def test_app_env_file_takes_precedence_over_app_env(monkeypatch, tmp_path):
     assert settings.auth.jwt_secret == "custom-secret-0123456789abcdef"
 
 
+def test_load_settings_preserves_literal_etc_path(monkeypatch, tmp_path):
+    repo_root = _prepare_repo_files(tmp_path)
+    (repo_root / ".env.dev").write_text(
+        "\n".join(
+            [
+                "APP_PORT=18881",
+                "DATABASE_PASSWORD=dev#password",
+                "JWT_SECRET=dev-secret-0123456789abcdef",
+                "SUPERVISOR_CONF_DIR=/etc/supervisord.d",
+                "ANSIBLE_INVENTORY_PATH=/etc/ansible/supervisor_host",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_module, "_repo_root", lambda: repo_root)
+
+    settings = config_module.load_settings({"APP_ENV": "dev"})
+
+    assert settings.supervisor.conf_dir == Path("/etc/supervisord.d")
+    assert settings.executor.ansible_inventory_path == Path("/etc/ansible/supervisor_host")
+
+
 def test_run_script_requires_env_argument():
     result = subprocess.run(
         ["bash", "scripts/run.sh"],

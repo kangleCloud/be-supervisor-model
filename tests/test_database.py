@@ -15,7 +15,7 @@ def test_database_initialization_is_idempotent(settings, fake_mysql):
     assert "sys_login_log" in fake_mysql.tables
     assert "sys_login_token" in fake_mysql.tables
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3, 4]
 
 
 def test_database_bootstraps_single_super_admin(settings, fake_mysql):
@@ -38,7 +38,7 @@ def test_database_recreates_missing_auth_tables(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_login_token" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3, 4]
 
 
 def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
@@ -50,7 +50,7 @@ def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3]
+    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1, 2, 3, 4]
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):
@@ -95,7 +95,7 @@ def test_super_admin_seed_sql_exists():
 
 
 def test_supervisor_service_migration_sql_contains_unique_keys():
-    """Supervisor 主数据表迁移需要声明三组唯一约束。"""
+    """Supervisor 主数据表基线迁移仍需声明旧版唯一约束。"""
     migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "003_init_supervisor_service_table.sql"
     migration_sql = migration_path.read_text(encoding="utf-8")
 
@@ -103,3 +103,22 @@ def test_supervisor_service_migration_sql_contains_unique_keys():
     assert "UNIQUE KEY `uk_supervisor_host_program` (`host_ip`, `program_name`)" in migration_sql
     assert "UNIQUE KEY `uk_supervisor_host_config` (`host_ip`, `config_name`)" in migration_sql
     assert "UNIQUE KEY `uk_supervisor_host_port` (`host_ip`, `port`)" in migration_sql
+
+
+def test_supervisor_service_readonly_import_migration_sql_exists():
+    """只读导入迁移必须声明路径键和冗余字段。"""
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "database"
+        / "migrations"
+        / "004_extend_supervisor_service_for_readonly_import.sql"
+    )
+    migration_sql = migration_path.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN `config_path`" in migration_sql
+    assert "ADD COLUMN `file_name`" in migration_sql
+    assert "ADD COLUMN `content_program_name`" in migration_sql
+    assert "ADD COLUMN `manage_mode`" in migration_sql
+    assert "ADD COLUMN `baseline_content`" in migration_sql
+    assert "ADD UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`)" in migration_sql

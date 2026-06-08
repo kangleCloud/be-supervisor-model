@@ -36,7 +36,7 @@ class RemoteExecutor(ABC):
         """执行受控命令。"""
 
     @abstractmethod
-    def list_configs(self, conf_dir: Path) -> list[Path]:
+    def list_configs(self, conf_dir: Path, *, recursive: bool = False, include_backups: bool = True) -> list[Path]:
         """列出配置目录下的配置与备份文件。"""
 
     @abstractmethod

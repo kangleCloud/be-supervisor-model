@@ -56,7 +56,7 @@ def list_hosts(manager: SupervisorManager = Depends(get_manager)):
 @router.get(
     "/services",
     summary="查询 Supervisor 服务列表",
-    description="按主机查询数据库中的纳管服务，并实时补充 supervisorctl 状态与远端文件漂移状态。",
+    description="按主机查询数据库中的纳管服务，并实时补充 supervisorctl 状态与远端文件漂移状态；兼容返回 configName/programName，同时显式返回 configPath/fileName/contentProgramName。",
     response_description="服务列表。",
 )
 def list_services(host: str = Query(..., description="目标主机 IP"), manager: SupervisorManager = Depends(get_manager)):
@@ -66,7 +66,7 @@ def list_services(host: str = Query(..., description="目标主机 IP"), manager
 @router.get(
     "/services/{program_name}",
     summary="查询 Supervisor 服务详情",
-    description="返回数据库中的纳管配置、按数据库实时渲染的期望内容，以及远端文件状态。",
+    description="返回数据库中的纳管配置、模板基线或导入快照内容，以及按 configPath 读取到的远端文件状态。",
     response_description="服务详情。",
 )
 def get_service_detail(
@@ -80,7 +80,7 @@ def get_service_detail(
 @router.post(
     "/services",
     summary="新增 Supervisor 服务",
-    description="先在远端写入 Supervisor 配置并执行 reread/update，成功后再把配置主数据落库。",
+    description="仅允许 local 主机新增 Supervisor 服务：先在本机写入配置并执行 reread/update，成功后再把模板纳管主数据落库。",
     response_description="新增结果。",
 )
 def create_service(
