@@ -179,6 +179,11 @@ class ConfigFileService:
             raise ConfigNotFoundError(f"配置文件不存在: {config_path}")
         return self._read_raw_config_by_path(host, absolute_path)
 
+    def read_raw_config_by_config_path_direct(self, host: str, config_path: str, *, allow_backups: bool = False) -> RawConfig:
+        """按相对路径直接读取配置原文，不做前置 exists 探测，导入链路专用。"""
+        absolute_path = self.build_config_path_from_relative(config_path, allow_backups=allow_backups)
+        return self._read_raw_config_by_path(host, absolute_path)
+
     def read_raw_config_optional_by_config_path(
         self,
         host: str,

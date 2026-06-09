@@ -518,7 +518,7 @@ def test_api_success_response_keeps_cors_headers(client, seed_user):
 
 
 def test_api_import_dry_run_prints_hostname_and_file_paths(client, test_environment, seed_user, capsys):
-    """验证 DRY_RUN 在服务端 stdout 输出 hostname 探测结果和文件路径。"""
+    """验证 DRY_RUN 在服务端 stdout 输出 hostname 探测结果和逐文件诊断。"""
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
@@ -541,6 +541,16 @@ def test_api_import_dry_run_prints_hostname_and_file_paths(client, test_environm
     assert "host=127.0.0.1" in captured
     assert "hostname=" in captured or "探测失败" in captured or "探测异常" in captured
     assert "saas/legacy-name.ini" in captured
+    # 验证逐文件诊断阶段输出
+    assert "start" in captured
+    assert "read_done" in captured
+    assert "parse_done" in captured
+    assert "plan_done" in captured
+    assert "finish" in captured
+    # 验证汇总日志
+    assert "导入汇总" in captured
+    assert "planned=1" in captured
+    assert "elapsed=" in captured
 
 
 def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
@@ -557,3 +567,41 @@ def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
     assert response.status_code == 404
     assert response.json()["code"] == 40400
     assert response.json()["msg"] == "远端目录下无可用配置文件"
+
+
+def test_api_import_skips_parse_error_and_continues(client, test_environment, seed_user, capsys):
+    """验证解析失败的文件被 SKIPPED，其余文件正常处理。"""
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    # 合法文件
+    (sub_dir / "valid.ini").write_text(
+        test_environment["build_ini"]("valid_service", 9100, job_name="demo", module_name="valid"),
+        encoding="utf-8",
+    )
+    # 非法文件 — 缺少 [program:*] 段
+    (conf_dir / "bad.ini").write_text("not-a-valid-ini-content\n", encoding="utf-8")
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 1}
+    # items 按 configPath 升序排列，bad.ini 在 saas/valid.ini 之前
+    assert data["items"][0]["configPath"] == "bad.ini"
+    assert data["items"][0]["result"] == "SKIPPED"
+    assert data["items"][1]["configPath"] == "saas/valid.ini"
+    assert data["items"][1]["result"] == "PLANNED"
+    # 诊断输出也包含两个文件的日志
+    captured = capsys.readouterr().out
+    assert "saas/valid.ini" in captured
+    assert "bad.ini" in captured
+    assert "导入汇总" in captured
+    assert "planned=1" in captured
+    assert "skipped=1" in captured

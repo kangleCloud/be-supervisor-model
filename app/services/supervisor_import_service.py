@@ -1,10 +1,11 @@
 """Supervisor 初始化导入编排服务。"""
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from app.core.exceptions import AppError, ConfigNotFoundError, ParamError
+from app.core.exceptions import AppError, ConfigNotFoundError, FileOperationError, ParamError
 from app.executor.base import ExecutorRuntimeError
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
@@ -136,6 +137,13 @@ def _print_config_paths_diagnostic(config_paths: list[str]) -> None:
         print(f"  configPath={path}, fileName={PurePosixPath(path).name}")
 
 
+def _diagnostic_finish_and_return(prefix: str, start_time: float, item: SupervisorImportItem) -> SupervisorImportItem:
+    """输出单文件 finish 日志并返回 item。"""
+    elapsed = time.time() - start_time
+    print(f"{prefix} finish result={item.result} elapsed={elapsed:.3f}s")
+    return item
+
+
 class SupervisorImportService:
     """统一编排初始化导入的预检与正式写库。"""
 
@@ -161,6 +169,7 @@ class SupervisorImportService:
         recursive: bool = True,
     ) -> SupervisorImportReport:
         """执行单主机初始化导入，返回逐文件结果。"""
+        overall_start = time.time()
         normalized_mode = self._normalize_mode(mode)
         safe_host = self.host_service.get_host(host).ip
         executor = self.host_service.get_executor(safe_host)
@@ -179,25 +188,38 @@ class SupervisorImportService:
             print("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置，返回失败")
             raise ConfigNotFoundError("远端目录下无可用配置文件")
 
-        items = tuple(
-            self._process_config_path(
+        total = len(config_paths)
+        items: list[SupervisorImportItem] = []
+        for index, config_path in enumerate(config_paths, start=1):
+            item = self._process_config_path_with_diagnostics(
                 host=safe_host,
                 config_path=config_path,
                 mode=normalized_mode,
                 operator_id=operator_id,
                 operator_name=operator_name,
+                index=index,
+                total=total,
             )
-            for config_path in config_paths
-        )
-        summary = SupervisorImportSummary(
-            planned=sum(1 for item in items if item.result != IMPORT_RESULT_SKIPPED),
-            imported=sum(1 for item in items if item.result == IMPORT_RESULT_IMPORTED),
-            updated=sum(1 for item in items if item.result == IMPORT_RESULT_UPDATED),
-            skipped=sum(1 for item in items if item.result == IMPORT_RESULT_SKIPPED),
-        )
-        return SupervisorImportReport(host=safe_host, mode=normalized_mode, summary=summary, items=items)
+            items.append(item)
 
-    def _process_config_path(
+        result_items = tuple(items)
+        summary = SupervisorImportSummary(
+            planned=sum(1 for item in result_items if item.result != IMPORT_RESULT_SKIPPED),
+            imported=sum(1 for item in result_items if item.result == IMPORT_RESULT_IMPORTED),
+            updated=sum(1 for item in result_items if item.result == IMPORT_RESULT_UPDATED),
+            skipped=sum(1 for item in result_items if item.result == IMPORT_RESULT_SKIPPED),
+        )
+        elapsed = time.time() - overall_start
+        print(
+            f"[SUPERVISOR_IMPORT_DEBUG] 导入汇总: "
+            f"host={safe_host}, mode={normalized_mode}, "
+            f"total={total}, planned={summary.planned}, "
+            f"imported={summary.imported}, updated={summary.updated}, "
+            f"skipped={summary.skipped}, elapsed={elapsed:.3f}s"
+        )
+        return SupervisorImportReport(host=safe_host, mode=normalized_mode, summary=summary, items=result_items)
+
+    def _process_config_path_with_diagnostics(
         self,
         *,
         host: str,
@@ -205,59 +227,77 @@ class SupervisorImportService:
         mode: str,
         operator_id: int,
         operator_name: str,
+        index: int,
+        total: int,
     ) -> SupervisorImportItem:
+        """单文件处理，带逐阶段诊断与耗时输出。"""
+        file_start = time.time()
         file_name = PurePosixPath(config_path).name
+        prefix = f"[SUPERVISOR_IMPORT_DEBUG] [{index}/{total}] {config_path}"
+
+        print(f"{prefix} start")
+
+        # === read ===
         try:
-            raw_config = self.config_file_service.read_raw_config_by_config_path(host, config_path)
+            read_start = time.time()
+            raw_config = self.config_file_service.read_raw_config_by_config_path_direct(host, config_path)
+            read_elapsed = time.time() - read_start
+            print(f"{prefix} read_done elapsed={read_elapsed:.3f}s")
+        except ConfigNotFoundError as exc:
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
+        except FileOperationError as exc:
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
+        except ExecutorRuntimeError as exc:
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc)))
+
+        # === parse ===
+        try:
+            parse_start = time.time()
             data = build_import_registry_data(self.template_service, host, raw_config)
+            parse_elapsed = time.time() - parse_start
+            print(f"{prefix} parse_done programName={data.content_program_name} metadataComplete={data.metadata_complete} warnings={len(data.parse_warnings)} elapsed={parse_elapsed:.3f}s")
         except AppError as exc:
-            return self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
         except Exception as exc:  # noqa: BLE001
-            return self._build_skipped_item(
-                config_path=config_path,
-                file_name=file_name,
-                message=self._stringify_unexpected_error(exc),
-            )
+            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc)))
 
+        # === plan ===
         try:
+            plan_start = time.time()
             normalized, existing_by_path = self.registry_service.plan_import_upsert(data)
+            plan_elapsed = time.time() - plan_start
+            result_so_far = IMPORT_RESULT_PLANNED if mode == IMPORT_MODE_DRY_RUN else IMPORT_RESULT_IMPORTED if existing_by_path is None else IMPORT_RESULT_UPDATED
+            print(f"{prefix} plan_done result={result_so_far} elapsed={plan_elapsed:.3f}s")
         except AppError as exc:
-            return self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
+            skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, skipped)
         except Exception as exc:  # noqa: BLE001
-            return self._build_item_from_data(
-                data,
-                result=IMPORT_RESULT_SKIPPED,
-                message=self._stringify_unexpected_error(exc),
-            )
+            skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
+            return _diagnostic_finish_and_return(prefix, file_start, skipped)
 
+        # === dry-run early return ===
         if mode == IMPORT_MODE_DRY_RUN:
-            return self._build_item_from_data(
-                normalized,
-                result=IMPORT_RESULT_PLANNED,
-                message=self._build_dry_run_message(existing_by_path),
-            )
+            item = self._build_item_from_data(normalized, result=IMPORT_RESULT_PLANNED, message=self._build_dry_run_message(existing_by_path))
+            return _diagnostic_finish_and_return(prefix, file_start, item)
 
+        # === apply ===
         try:
-            record, created = self.registry_service.upsert_imported(
-                normalized,
-                operator_id=operator_id,
-                operator_name=operator_name,
-                remark=IMPORT_REMARK,
-            )
+            apply_start = time.time()
+            record, created = self.registry_service.upsert_imported(normalized, operator_id=operator_id, operator_name=operator_name, remark=IMPORT_REMARK)
+            apply_elapsed = time.time() - apply_start
+            result_str = IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED
+            print(f"{prefix} apply_done result={result_str} elapsed={apply_elapsed:.3f}s")
         except AppError as exc:
-            return self._build_item_from_data(normalized, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
+            skipped = self._build_item_from_data(normalized, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, skipped)
         except Exception as exc:  # noqa: BLE001
-            return self._build_item_from_data(
-                normalized,
-                result=IMPORT_RESULT_SKIPPED,
-                message=self._stringify_unexpected_error(exc),
-            )
+            skipped = self._build_item_from_data(normalized, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
+            return _diagnostic_finish_and_return(prefix, file_start, skipped)
 
-        return self._build_item_from_record(
-            record,
-            result=IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED,
-            message=self._build_apply_message(existing_by_path, created),
-        )
+        item = self._build_item_from_record(record, result=IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED, message=self._build_apply_message(existing_by_path, created))
+        return _diagnostic_finish_and_return(prefix, file_start, item)
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:
