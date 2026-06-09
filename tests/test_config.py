@@ -22,15 +22,25 @@ def _prepare_repo_files(tmp_path: Path) -> Path:
         "\n".join(
             [
                 "app:",
-                "  port: 18880",
+                "  host: 0.0.0.0",
+                "  port: 18881",
+                "  logLevel: info",
                 "database:",
-                "  password: yaml#password",
+                "  host: 106.54.205.33",
+                "  port: 3306",
+                "  name: be_supervisor_model",
+                "  user: root",
+                "  connectTimeoutSeconds: 5",
                 "auth:",
-                "  jwtSecret: yaml-secret-0123456789abcdef",
+                "  accessTokenExpireMinutes: 480",
                 "supervisor:",
-                f"  confDir: {repo_root / 'yaml-supervisord.d'}",
+                f"  confDir: {repo_root / 'shared-supervisord.d'}",
+                "  commandTimeoutSeconds: 30",
                 "executor:",
-                f"  inventoryPath: {repo_root / 'yaml-inventory'}",
+                "  type: local",
+                f"  inventoryPath: {repo_root / 'shared-inventory'}",
+                "  remoteUser: root",
+                "  timeoutSeconds: 30",
             ]
         ),
         encoding="utf-8",
@@ -39,11 +49,9 @@ def _prepare_repo_files(tmp_path: Path) -> Path:
     (repo_root / ".env.dev").write_text(
         "\n".join(
             [
-                "APP_PORT=18881",
                 "DATABASE_PASSWORD=dev#password",
                 "JWT_SECRET=dev-secret-0123456789abcdef",
-                f"SUPERVISOR_CONF_DIR={repo_root / 'dev-supervisord.d'}",
-                f"ANSIBLE_INVENTORY_PATH={repo_root / 'dev-inventory'}",
+                "APP_CONFIG_PATH=",
             ]
         ),
         encoding="utf-8",
@@ -52,11 +60,9 @@ def _prepare_repo_files(tmp_path: Path) -> Path:
     (repo_root / ".env.prod").write_text(
         "\n".join(
             [
-                "APP_PORT=28881",
                 "DATABASE_PASSWORD=prod#password",
                 "JWT_SECRET=prod-secret-0123456789abcdef",
-                f"SUPERVISOR_CONF_DIR={repo_root / 'prod-supervisord.d'}",
-                f"ANSIBLE_INVENTORY_PATH={repo_root / 'prod-inventory'}",
+                "APP_CONFIG_PATH=",
             ]
         ),
         encoding="utf-8",
@@ -71,9 +77,10 @@ def test_load_settings_reads_dev_env_file(monkeypatch, tmp_path):
     settings = config_module.load_settings({"APP_ENV": "dev"})
 
     assert settings.app.port == 18881
+    assert settings.database.host == "106.54.205.33"
     assert settings.database.password == "dev#password"
     assert settings.auth.jwt_secret == "dev-secret-0123456789abcdef"
-    assert settings.supervisor.conf_dir == (repo_root / "dev-supervisord.d").resolve()
+    assert settings.supervisor.conf_dir == (repo_root / "shared-supervisord.d").resolve()
 
 
 def test_load_settings_reads_prod_env_file(monkeypatch, tmp_path):
@@ -82,10 +89,10 @@ def test_load_settings_reads_prod_env_file(monkeypatch, tmp_path):
 
     settings = config_module.load_settings({"APP_ENV": "prod"})
 
-    assert settings.app.port == 28881
+    assert settings.app.port == 18881
     assert settings.database.password == "prod#password"
     assert settings.auth.jwt_secret == "prod-secret-0123456789abcdef"
-    assert settings.executor.ansible_inventory_path == (repo_root / "prod-inventory").resolve()
+    assert settings.executor.ansible_inventory_path == (repo_root / "shared-inventory").resolve()
 
 
 def test_process_env_overrides_env_file(monkeypatch, tmp_path):
@@ -106,14 +113,14 @@ def test_process_env_overrides_env_file(monkeypatch, tmp_path):
     assert settings.auth.jwt_secret == "explicit-secret-0123456789abcdef"
 
 
-def test_env_file_overrides_config_yaml(monkeypatch, tmp_path):
+def test_env_file_supplies_secrets_when_config_yaml_omits_them(monkeypatch, tmp_path):
     repo_root = _prepare_repo_files(tmp_path)
     monkeypatch.setattr(config_module, "_repo_root", lambda: repo_root)
 
     settings = config_module.load_settings({"APP_ENV": "dev"})
 
-    assert settings.database.password != "yaml#password"
     assert settings.database.password == "dev#password"
+    assert settings.auth.jwt_secret == "dev-secret-0123456789abcdef"
 
 
 def test_load_settings_rejects_invalid_app_env(monkeypatch, tmp_path):
@@ -162,7 +169,6 @@ def test_load_settings_preserves_literal_etc_path(monkeypatch, tmp_path):
     (repo_root / ".env.dev").write_text(
         "\n".join(
             [
-                "APP_PORT=18881",
                 "DATABASE_PASSWORD=dev#password",
                 "JWT_SECRET=dev-secret-0123456789abcdef",
                 "SUPERVISOR_CONF_DIR=/etc/supervisord.d",
@@ -177,6 +183,14 @@ def test_load_settings_preserves_literal_etc_path(monkeypatch, tmp_path):
 
     assert settings.supervisor.conf_dir == Path("/etc/supervisord.d")
     assert settings.executor.ansible_inventory_path == Path("/etc/ansible/supervisor_host")
+
+
+def test_load_settings_without_app_env_reads_config_yaml_and_requires_process_secret(monkeypatch, tmp_path):
+    repo_root = _prepare_repo_files(tmp_path)
+    monkeypatch.setattr(config_module, "_repo_root", lambda: repo_root)
+
+    with pytest.raises(ValueError, match="JWT_SECRET 不能为空"):
+        config_module.load_settings({})
 
 
 def test_run_script_requires_env_argument():

@@ -8,11 +8,9 @@ database:
   port: 3306
   name: be_supervisor_model
   user: root
-  # password 请通过 .env.dev / .env.prod 覆盖
   connectTimeoutSeconds: 5
 
 auth:
-  # jwtSecret 请通过 .env.dev / .env.prod 覆盖
   accessTokenExpireMinutes: 480
 
 supervisor:
