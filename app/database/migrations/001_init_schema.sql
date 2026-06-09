@@ -76,3 +76,66 @@ CREATE TABLE IF NOT EXISTS `sys_login_token` (
     KEY `idx_login_token_user_id` (`user_id`),
     KEY `idx_login_token_expires_at` (`expires_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='JWT登录令牌表';
+
+CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT 'ID',
+    `host_ip` VARCHAR(64) NOT NULL COMMENT '目标主机IP',
+    `config_path` VARCHAR(500) NOT NULL COMMENT '相对 /etc/supervisord.d 的配置路径',
+    `file_name` VARCHAR(255) NOT NULL COMMENT '配置文件 basename',
+    `content_program_name` VARCHAR(255) NOT NULL COMMENT '配置内容中的 program_name',
+    `manage_mode` VARCHAR(32) NOT NULL DEFAULT 'TEMPLATE_MANAGED' COMMENT '纳管模式',
+    `baseline_content` MEDIUMTEXT DEFAULT NULL COMMENT '模板基线或导入原文快照',
+    `metadata_complete` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '结构化字段是否完整',
+    `parse_warnings` TEXT DEFAULT NULL COMMENT '解析告警JSON',
+    `job_name` VARCHAR(128) DEFAULT NULL COMMENT '业务作业名称',
+    `module_name` VARCHAR(128) DEFAULT NULL COMMENT '模块名称',
+    `program_name` VARCHAR(255) NOT NULL COMMENT '兼容展示字段，固定等于 content_program_name',
+    `config_name` VARCHAR(255) NOT NULL COMMENT '兼容展示字段，固定等于 file_name',
+    `java_path` VARCHAR(500) DEFAULT NULL COMMENT 'Java可执行文件绝对路径',
+    `active_profile` VARCHAR(64) DEFAULT NULL COMMENT 'Spring profile环境',
+    `port` INT DEFAULT NULL COMMENT '服务监听端口',
+    `jar_name` VARCHAR(255) DEFAULT NULL COMMENT 'Jar包文件名',
+    `xms` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xms 参数',
+    `xmx` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xmx 参数',
+    `run_user` VARCHAR(64) DEFAULT NULL COMMENT 'Supervisor运行用户',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新增时间',
+    `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `create_by_id` BIGINT DEFAULT NULL COMMENT '新增人ID',
+    `create_by` VARCHAR(50) DEFAULT NULL COMMENT '新增人名称',
+    `update_by_id` BIGINT DEFAULT NULL COMMENT '更新人ID',
+    `update_by` VARCHAR(50) DEFAULT NULL COMMENT '更新人名称',
+    `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
+    UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`),
+    KEY `idx_supervisor_host_program` (`host_ip`, `program_name`),
+    KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Supervisor服务主数据表';
+
+INSERT INTO `sys_user`(
+    `id`, `tenant_id`, `user_name`, `nick_name`, `password`, `status`, `is_super_admin`,
+    `pwd_update_date`, `create_by_id`, `create_by`, `update_by_id`, `update_by`, `version`, `remark`
+)
+SELECT
+    next_user.next_id,
+    0,
+    'admin',
+    '超级管理员',
+    '$2b$12$27nxsNqi/PQ8Yo3Py.cs/uWDVi.e1z7lQQhMbmm5AIEjhNRWodN7K',
+    1,
+    1,
+    CURRENT_TIMESTAMP,
+    0,
+    'system',
+    0,
+    'system',
+    0,
+    '系统初始化超级管理员，请尽快重置默认密码'
+FROM (
+    SELECT COALESCE(MAX(`id`), 0) + 1 AS next_id
+    FROM `sys_user`
+) AS next_user
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM `sys_user`
+    WHERE `user_name` = 'admin'
+      AND `is_deleted` = 0
+);

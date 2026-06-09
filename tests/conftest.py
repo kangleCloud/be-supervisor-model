@@ -348,6 +348,13 @@ class FakeMySQLServer:
         row.setdefault("remark", "测试服务")
         return row
 
+    @staticmethod
+    def _matches_insert(normalized: str, table_name: str) -> bool:
+        """兼容是否带反引号的 INSERT INTO table(...) 写法。"""
+        return normalized.startswith(f"INSERT INTO {table_name}(") or normalized.startswith(
+            f"INSERT INTO `{table_name}`("
+        )
+
     def execute(self, query: str, params: tuple[Any, ...], cursor: FakeMySQLCursor) -> int:
         normalized = " ".join(query.strip().split())
         cursor.results = []
@@ -361,11 +368,6 @@ class FakeMySQLServer:
         if normalized.startswith("CREATE TABLE IF NOT EXISTS"):
             table_name = normalized.split("`")[1] if "`" in normalized else normalized.split()[5]
             self.tables.setdefault(table_name, [])
-            return 1
-
-        if normalized.startswith("ALTER TABLE `sys_supervisor_service`"):
-            for row in self.tables.get("sys_supervisor_service", []):
-                self._hydrate_supervisor_defaults(row)
             return 1
 
         if normalized == "SHOW TABLES LIKE %s":
@@ -400,7 +402,7 @@ class FakeMySQLServer:
             cursor.results = [row] if row else []
             return len(cursor.results)
 
-        if normalized.startswith("INSERT INTO sys_user("):
+        if self._matches_insert(normalized, "sys_user"):
             active_admin = next(
                 (
                     item
@@ -450,7 +452,7 @@ class FakeMySQLServer:
                     return 1
             return 0
 
-        if normalized.startswith("INSERT INTO sys_login_token("):
+        if self._matches_insert(normalized, "sys_login_token"):
             token_id = self.auto_increment["sys_login_token"]
             self.auto_increment["sys_login_token"] += 1
             row = {
@@ -504,7 +506,7 @@ class FakeMySQLServer:
                     return 1
             return 0
 
-        if normalized.startswith("INSERT INTO sys_login_log("):
+        if self._matches_insert(normalized, "sys_login_log"):
             log_id = self.auto_increment["sys_login_log"]
             self.auto_increment["sys_login_log"] += 1
             self.tables.setdefault("sys_login_log", []).append(
@@ -530,20 +532,6 @@ class FakeMySQLServer:
             )
             cursor.lastrowid = log_id
             return 1
-
-        if normalized.startswith("UPDATE `sys_supervisor_service` SET `config_path` = IFNULL(`config_path`, `config_name`)"):
-            for row in self.tables.get("sys_supervisor_service", []):
-                self._hydrate_supervisor_defaults(row)
-                row["config_path"] = row.get("config_path") or row.get("config_name")
-                row["file_name"] = row.get("file_name") or row.get("config_name")
-                row["content_program_name"] = row.get("content_program_name") or row.get("program_name")
-                row["program_name"] = row.get("program_name") or row.get("content_program_name")
-                row["config_name"] = row.get("config_name") or row.get("file_name")
-                row["manage_mode"] = row.get("manage_mode") or "TEMPLATE_MANAGED"
-                row["baseline_content"] = row.get("baseline_content") or ""
-                row["metadata_complete"] = row.get("metadata_complete") if row.get("metadata_complete") is not None else 1
-                row["parse_warnings"] = row.get("parse_warnings") or "[]"
-            return len(self.tables.get("sys_supervisor_service", []))
 
         if "FROM sys_supervisor_service WHERE host_ip = %s ORDER BY id ASC" in normalized:
             host_ip = str(params[0])
@@ -583,7 +571,7 @@ class FakeMySQLServer:
             cursor.results = [dict(row)] if row else []
             return len(cursor.results)
 
-        if normalized.startswith("INSERT INTO sys_supervisor_service("):
+        if self._matches_insert(normalized, "sys_supervisor_service"):
             if self.fail_next_supervisor_insert:
                 self.fail_next_supervisor_insert = False
                 raise RuntimeError("模拟 Supervisor 主数据写库失败")

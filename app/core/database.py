@@ -17,8 +17,7 @@ MIGRATION_FILE_PATTERN = re.compile(r"^(?P<version>\d+)_.*\.sql$")
 DATABASE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "database" / "migrations"
 REQUIRED_TABLE_MIGRATIONS: dict[int, tuple[str, ...]] = {
-    1: ("sys_user", "sys_login_log", "sys_login_token"),
-    3: ("sys_supervisor_service",),
+    1: ("sys_user", "sys_login_log", "sys_login_token", "sys_supervisor_service"),
 }
 
 
@@ -130,7 +129,7 @@ def _execute_script(cursor: Cursor, script: str) -> None:
 
 
 def _ensure_required_tables(cursor: Cursor, migrations: list[tuple[int, Path]]) -> None:
-    """校验关键业务表存在，缺表时按对应迁移补建。"""
+    """校验关键业务表存在，缺表时重放单基线 SQL 补建。"""
     for version, table_names in REQUIRED_TABLE_MIGRATIONS.items():
         missing_tables = _find_missing_tables(cursor, table_names)
         if not missing_tables:

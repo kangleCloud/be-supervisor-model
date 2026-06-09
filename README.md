@@ -132,7 +132,7 @@ cp config.example.yaml config.yaml
 数据库启动规则：
 
 - 服务启动时会自动创建目标数据库（若不存在）
-- 会自动执行 `app/database/migrations/*.sql` 中的表结构迁移
+- 会自动执行 `app/database/migrations/001_init_schema.sql` 单基线初始化 SQL
 - 会自动初始化一条超级管理员账号：`admin / Admin@123456`
 - 其他账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
 
@@ -169,6 +169,7 @@ python3 scripts/hash_password.py
 - 本次跨域预检修复见 [docs/03.跨域预检与跨源访问说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/03.跨域预检与跨源访问说明.md)
 - 本次远端只读约束与路径修正见 [docs/04.远端只读约束与路径语义修正.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/04.远端只读约束与路径语义修正.md)
 - 本次只读初始化导入与冗余字段设计见 [docs/05.只读初始化导入与冗余字段设计.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/05.只读初始化导入与冗余字段设计.md)
+- 本次数据库基线 DDL 整合见 [docs/06.数据库基线DDL整合说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/06.数据库基线DDL整合说明.md)
 
 ## 启动方式
 
