@@ -1,9 +1,12 @@
 """Supervisor API 请求模型。"""
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.core.security import ensure_safe_name, ensure_valid_port
+from app.core.exceptions import ParamError
+from app.core.security import ensure_safe_host, ensure_safe_name, ensure_valid_port
 
 
 class ServiceCreateRequest(BaseModel):
@@ -52,3 +55,20 @@ class ServiceCreateRequest(BaseModel):
         if not raw_value:
             raise ValueError(f"{info.field_name} 不能为空")
         return raw_value
+
+
+class SupervisorImportRequest(BaseModel):
+    """初始化导入请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(..., description="目标主机 IP")
+    mode: Literal["DRY_RUN", "APPLY"] = Field(..., description="导入模式：DRY_RUN 仅预检，APPLY 正式导入")
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        try:
+            return ensure_safe_host(value)
+        except ParamError as exc:
+            raise ValueError(exc.msg) from exc

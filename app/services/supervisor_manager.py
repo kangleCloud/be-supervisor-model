@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 
 from app.core.exceptions import AppError, InternalError
-from app.schemas.supervisor import ServiceCreateRequest
+from app.schemas.supervisor import ServiceCreateRequest, SupervisorImportRequest
+from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
+from app.services.supervisor_import_service import SupervisorImportService
 from app.services.port_check_service import PortCheckService
 from app.services.supervisor_registry_service import (
     MANAGE_MODE_IMPORTED_READONLY,
@@ -36,6 +38,7 @@ class SupervisorManager:
         port_check_service: PortCheckService,
         supervisor_service: SupervisorService,
         registry_service: SupervisorRegistryService,
+        import_service: SupervisorImportService,
     ):
         self.host_service = host_service
         self.template_service = template_service
@@ -43,6 +46,7 @@ class SupervisorManager:
         self.port_check_service = port_check_service
         self.supervisor_service = supervisor_service
         self.registry_service = registry_service
+        self.import_service = import_service
 
     def list_hosts(self) -> list[dict[str, object]]:
         """返回允许的主机列表。"""
@@ -131,6 +135,21 @@ class SupervisorManager:
         status_entries = self.supervisor_service.status(payload.host, record.program_name)
         status = status_entries[0].to_dict() if status_entries else None
         return self._build_service_payload(record, status=status, file_state=FILE_STATE_MATCH)
+
+    def import_services(
+        self,
+        payload: SupervisorImportRequest,
+        current_user: AuthenticatedUser,
+    ) -> dict[str, object]:
+        """执行初始化导入，并返回面向前端的逐文件结果。"""
+        report = self.import_service.execute(
+            host=payload.host,
+            mode=payload.mode,
+            operator_id=current_user.user_id,
+            operator_name=current_user.username,
+            recursive=True,
+        )
+        return report.to_dict()
 
     def _render_expected_content(self, record: SupervisorRegistryRecord) -> str:
         """详情与漂移判断要区分模板纳管与只读导入快照。"""

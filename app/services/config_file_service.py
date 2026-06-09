@@ -85,6 +85,10 @@ class ConfigFileService:
         safe_path = ensure_safe_path_under_dir(self._conf_dir(), path)
         return safe_path.relative_to(self._conf_dir()).as_posix()
 
+    def to_relative_config_path(self, path: Path) -> str:
+        """把配置绝对路径转换成 confDir 下的安全相对路径。"""
+        return self._relative_config_path(path)
+
     def _build_raw_config(self, path: Path, content: str) -> RawConfig:
         config_path = self._relative_config_path(path)
         return RawConfig(

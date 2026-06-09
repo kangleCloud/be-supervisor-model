@@ -209,14 +209,7 @@ class SupervisorRegistryService:
         remark: str,
     ) -> tuple[SupervisorRegistryRecord, bool]:
         """按 host + configPath 幂等写入只读导入快照。"""
-        normalized = self._normalize_write_data(data)
-        if normalized.manage_mode != MANAGE_MODE_IMPORTED_READONLY:
-            raise ParamError("导入快照必须使用 IMPORTED_READONLY 模式")
-
-        existing_by_path = self.get_by_config_path_optional(normalized.host_ip, normalized.config_path)
-        existing_by_program = self.get_by_program_name_optional(normalized.host_ip, normalized.program_name)
-        if existing_by_program is not None and existing_by_program.config_path != normalized.config_path:
-            raise ConfigAlreadyExistsError(f"服务已存在: {existing_by_program.program_name}")
+        normalized, existing_by_path = self.plan_import_upsert(data)
 
         with get_connection(self.settings) as connection:
             with connection.cursor() as cursor:
@@ -296,6 +289,21 @@ class SupervisorRegistryService:
                 )
             connection.commit()
         return self._build_record_from_data(existing_by_path.id, normalized), False
+
+    def plan_import_upsert(
+        self,
+        data: SupervisorRegistryCreateData,
+    ) -> tuple[SupervisorRegistryCreateData, SupervisorRegistryRecord | None]:
+        """校验导入快照写库规则，并返回规范化数据及同路径现存记录。"""
+        normalized = self._normalize_write_data(data)
+        if normalized.manage_mode != MANAGE_MODE_IMPORTED_READONLY:
+            raise ParamError("导入快照必须使用 IMPORTED_READONLY 模式")
+
+        existing_by_path = self.get_by_config_path_optional(normalized.host_ip, normalized.config_path)
+        existing_by_program = self.get_by_program_name_optional(normalized.host_ip, normalized.program_name)
+        if existing_by_program is not None and existing_by_program.config_path != normalized.config_path:
+            raise ConfigAlreadyExistsError(f"服务已存在: {existing_by_program.program_name}")
+        return normalized, existing_by_path
 
     def _normalize_write_data(self, data: SupervisorRegistryCreateData) -> SupervisorRegistryCreateData:
         safe_host = ensure_safe_host(data.host_ip)

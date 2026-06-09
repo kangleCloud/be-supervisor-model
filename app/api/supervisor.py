@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, Query
 from app.core.config import get_settings
 from app.core.response import ok
 from app.core.security import verify_jwt_dependency
-from app.schemas.supervisor import ServiceCreateRequest
+from app.schemas.supervisor import ServiceCreateRequest, SupervisorImportRequest
 from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.port_check_service import PortCheckService
+from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_manager import SupervisorManager
 from app.services.supervisor_registry_service import SupervisorRegistryService
 from app.services.supervisor_service import SupervisorService
@@ -33,6 +34,7 @@ def get_manager() -> SupervisorManager:
     port_check_service = PortCheckService(config_file_service)
     supervisor_service = SupervisorService(host_service)
     registry_service = SupervisorRegistryService(settings)
+    import_service = SupervisorImportService(host_service, config_file_service, template_service, registry_service)
     return SupervisorManager(
         host_service,
         template_service,
@@ -40,6 +42,7 @@ def get_manager() -> SupervisorManager:
         port_check_service,
         supervisor_service,
         registry_service,
+        import_service,
     )
 
 
@@ -75,6 +78,20 @@ def get_service_detail(
     manager: SupervisorManager = Depends(get_manager),
 ):
     return ok(manager.get_service_detail(host, program_name), msg="查询服务详情成功")
+
+
+@router.post(
+    "/imports",
+    summary="初始化导入 Supervisor 配置",
+    description="固定递归扫描目标主机 /etc/supervisord.d 下的 *.ini，DRY_RUN 仅返回逐文件预检结果，APPLY 才会把只读快照写入数据库。",
+    response_description="导入汇总与逐文件结果。",
+)
+def import_services(
+    payload: SupervisorImportRequest,
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.import_services(payload, current_user), msg="执行初始化导入成功")
 
 
 @router.post(

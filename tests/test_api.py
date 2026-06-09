@@ -21,6 +21,13 @@ def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[s
     }
 
 
+def _import_payload(host: str, mode: str = "DRY_RUN") -> dict[str, str]:
+    return {
+        "host": host,
+        "mode": mode,
+    }
+
+
 def _login_headers(client) -> dict[str, str]:
     response = client.post(
         "/admin/api/auth/login",
@@ -213,6 +220,167 @@ def test_api_imported_readonly_detail_uses_baseline_content(client, test_environ
     assert len(detail_data["parseWarnings"]) == 1
     assert detail_data["expectedContent"] == baseline_content
     assert detail_data["fileState"] == "MATCH"
+
+
+def test_api_imports_dry_run_returns_planned_items(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    (sub_dir / "legacy-name.ini").write_text(
+        test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc"),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["host"] == "127.0.0.1"
+    assert data["mode"] == "DRY_RUN"
+    assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 0}
+    assert len(data["items"]) == 1
+    assert data["items"][0]["configPath"] == "saas/legacy-name.ini"
+    assert data["items"][0]["fileName"] == "legacy-name.ini"
+    assert data["items"][0]["contentProgramName"] == "legacy_service"
+    assert data["items"][0]["programName"] == "legacy_service"
+    assert data["items"][0]["configName"] == "legacy-name.ini"
+    assert data["items"][0]["manageMode"] == "IMPORTED_READONLY"
+    assert data["items"][0]["result"] == "PLANNED"
+    assert fake_mysql.tables.get("sys_supervisor_service") in (None, [])
+
+
+def test_api_imports_apply_writes_database(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    baseline_content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "APPLY"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "APPLY"
+    assert data["summary"] == {"planned": 1, "imported": 1, "updated": 0, "skipped": 0}
+    assert data["items"][0]["result"] == "IMPORTED"
+    assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
+    assert fake_mysql.tables["sys_supervisor_service"][0]["config_path"] == "saas/legacy-name.ini"
+    assert fake_mysql.tables["sys_supervisor_service"][0]["manage_mode"] == "IMPORTED_READONLY"
+    assert fake_mysql.tables["sys_supervisor_service"][0]["baseline_content"] == baseline_content
+
+
+def test_api_imports_apply_overwrites_template_managed_record(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    baseline_content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="legacy",
+        module_name="svc",
+        program_name="legacy_service",
+        config_name="legacy-name.ini",
+        config_path="saas/legacy-name.ini",
+        file_name="legacy-name.ini",
+        content_program_name="legacy_service",
+        manage_mode="TEMPLATE_MANAGED",
+        baseline_content="[program:legacy_service]\nuser=old\n",
+        metadata_complete=True,
+        parse_warnings="[]",
+        java_path="/usr/local/jdk17/bin/java",
+        active_profile="prod",
+        port=9200,
+        jar_name="svc.jar",
+        xms="128m",
+        xmx="128m",
+        run_user="root",
+    )
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "APPLY"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["summary"] == {"planned": 1, "imported": 0, "updated": 1, "skipped": 0}
+    assert data["items"][0]["result"] == "UPDATED"
+    assert data["items"][0]["message"] == "已覆盖原模板纳管记录"
+    assert fake_mysql.tables["sys_supervisor_service"][0]["manage_mode"] == "IMPORTED_READONLY"
+    assert fake_mysql.tables["sys_supervisor_service"][0]["baseline_content"] == baseline_content
+
+
+def test_api_imports_skip_program_conflict_and_continue(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "zz"
+    sub_dir.mkdir()
+    (conf_dir / "aa-valid.ini").write_text(
+        test_environment["build_ini"]("aa_valid", 9100, job_name="demo", module_name="valid"),
+        encoding="utf-8",
+    )
+    (sub_dir / "conflict.ini").write_text(
+        (
+            "[program:legacy_conflict]\n"
+            "command=/usr/local/jdk17/bin/java -jar -Xms256m -Xmx512m "
+            "-Dspring.profiles.active=prod -Dserver.port=9200 /data/content/legacy/conflict.jar\n"
+            "directory=/data/content/legacy/conflict\n"
+        ),
+        encoding="utf-8",
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="legacy",
+        module_name="conflict",
+        program_name="legacy_conflict",
+        config_name="existing.ini",
+        config_path="existing.ini",
+        file_name="existing.ini",
+        content_program_name="legacy_conflict",
+        manage_mode="IMPORTED_READONLY",
+        baseline_content="[program:legacy_conflict]\n",
+        metadata_complete=True,
+        parse_warnings="[]",
+        java_path="/usr/local/jdk17/bin/java",
+        active_profile="prod",
+        port=9201,
+        jar_name="conflict.jar",
+        xms="256m",
+        xmx="512m",
+        run_user="root",
+    )
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "APPLY"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["summary"] == {"planned": 1, "imported": 1, "updated": 0, "skipped": 1}
+    assert [item["configPath"] for item in data["items"]] == ["aa-valid.ini", "zz/conflict.ini"]
+    assert data["items"][0]["result"] == "IMPORTED"
+    assert data["items"][1]["result"] == "SKIPPED"
+    assert data["items"][1]["message"] == "服务已存在: legacy_conflict"
+    assert len(fake_mysql.tables["sys_supervisor_service"]) == 2
 
 
 def test_api_rejects_duplicate_registry_record_before_remote_write(client, test_environment, seed_user, fake_mysql):
