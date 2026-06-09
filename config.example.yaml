@@ -17,13 +17,13 @@ auth:
 
 supervisor:
   confDir: /etc/supervisord.d
-  commandTimeoutSeconds: 30
+  commandTimeoutSeconds: 300
 
 executor:
   type: local
   inventoryPath: /Users/zhuningkang/.ansible/supervisor_host
   remoteUser: root
-  timeoutSeconds: 30
+  timeoutSeconds: 300
 
 hosts:
   - name: local
@@ -34,14 +34,11 @@ hosts:
     ip: 10.1.0.99
     enabled: true
     executorType: ansible
-    ansiblePattern: web-99
   - name: web-104
     ip: 10.1.0.104
     enabled: true
     executorType: ansible
-    ansiblePattern: web-104
   - name: web-252
     ip: 101.1.0.252
     enabled: true
     executorType: ansible
-    ansiblePattern: web-252

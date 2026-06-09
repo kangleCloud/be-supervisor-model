@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from app.core.config import HostConfig, get_settings
+from app.core.exceptions import AppError
 from app.core.database import initialize_database
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
@@ -53,13 +54,17 @@ def main() -> int:
     print(f"== 导入模式 {mode}，recursive={args.recursive} ==")
     for host in target_hosts:
         print(f"== 处理主机 {host.ip} ({host.name}) ==")
-        report = import_service.execute(
-            host=host.ip,
-            mode=mode,
-            operator_id=0,
-            operator_name="system",
-            recursive=args.recursive,
-        )
+        try:
+            report = import_service.execute(
+                host=host.ip,
+                mode=mode,
+                operator_id=0,
+                operator_name="system",
+                recursive=args.recursive,
+            )
+        except AppError as exc:
+            print(f"导入失败: {exc}")
+            continue
         _print_report(report)
         summary["planned"] += report.summary.planned
         summary["imported"] += report.summary.imported

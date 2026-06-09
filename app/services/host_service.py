@@ -23,7 +23,6 @@ class HostService:
                 "ip": host.ip,
                 "enabled": host.enabled,
                 "executorType": host.executor_type,
-                "ansiblePattern": host.ansible_pattern,
             }
             for host in self.settings.hosts
         ]

@@ -4,7 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from app.core.exceptions import AppError, ParamError
+from app.core.exceptions import AppError, ConfigNotFoundError, ParamError
+from app.executor.base import ExecutorRuntimeError
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
 from app.services.supervisor_registry_service import (
@@ -113,6 +114,28 @@ class SupervisorImportReport:
         }
 
 
+def _print_hostname_diagnostic(host: str, executor_type: str, executor) -> None:
+    """探测目标主机 hostname 并输出到控制台，不影响主流程。"""
+    try:
+        result = executor.run_command(["hostname"])
+        if result.success:
+            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname={result.stdout.strip()}")
+        else:
+            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测失败: {result.stderr.strip() or 'unknown error'}")
+    except ExecutorRuntimeError as exc:
+        print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测异常: {exc}")
+
+
+def _print_config_paths_diagnostic(config_paths: list[str]) -> None:
+    """输出扫描到的配置路径到控制台，便于联调定位。"""
+    if not config_paths:
+        print("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置")
+        return
+    print(f"[SUPERVISOR_IMPORT_DEBUG] 发现 {len(config_paths)} 个配置文件:")
+    for path in config_paths:
+        print(f"  configPath={path}, fileName={PurePosixPath(path).name}")
+
+
 class SupervisorImportService:
     """统一编排初始化导入的预检与正式写库。"""
 
@@ -140,6 +163,9 @@ class SupervisorImportService:
         """执行单主机初始化导入，返回逐文件结果。"""
         normalized_mode = self._normalize_mode(mode)
         safe_host = self.host_service.get_host(host).ip
+        executor = self.host_service.get_executor(safe_host)
+        _print_hostname_diagnostic(safe_host, self.host_service.get_host(safe_host).executor_type, executor)
+
         config_paths = sorted(
             self.config_file_service.to_relative_config_path(path)
             for path in self.config_file_service.list_config_paths(
@@ -148,6 +174,10 @@ class SupervisorImportService:
                 recursive=recursive,
             )
         )
+        _print_config_paths_diagnostic(config_paths)
+        if not config_paths:
+            print("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置，返回失败")
+            raise ConfigNotFoundError("远端目录下无可用配置文件")
 
         items = tuple(
             self._process_config_path(

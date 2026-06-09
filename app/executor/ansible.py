@@ -30,14 +30,10 @@ class AnsibleExecutor(RemoteExecutor):
         self.host = host
         self.settings = settings
 
-    @property
-    def _pattern(self) -> str:
-        return self.host.ansible_pattern or self.host.ip
-
     def _base_args(self) -> list[str]:
         return [
             "ansible",
-            self._pattern,
+            self.host.ip,
             "-i",
             str(self.settings.ansible_inventory_path),
             "-u",
@@ -63,6 +59,14 @@ class AnsibleExecutor(RemoteExecutor):
 
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
+
+        combined = f"{stdout}\n{stderr}".lower()
+        if "could not match supplied host pattern" in combined or "no hosts matched" in combined:
+            return CommandResult(
+                tuple(command), 1, stdout,
+                f"目标主机未匹配: ansible inventory 中未找到 {self.host.ip}",
+            )
+
         return CommandResult(tuple(command), proc.returncode, stdout, stderr)
 
     @staticmethod

@@ -701,7 +701,6 @@ def test_environment(tmp_path, monkeypatch):
                 "    ip: 10.1.0.104",
                 "    enabled: true",
                 "    executorType: ansible",
-                "    ansiblePattern: web-104",
             ]
         ),
         encoding="utf-8",

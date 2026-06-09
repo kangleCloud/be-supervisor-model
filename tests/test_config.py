@@ -35,12 +35,12 @@ def _prepare_repo_files(tmp_path: Path) -> Path:
                 "  accessTokenExpireMinutes: 480",
                 "supervisor:",
                 f"  confDir: {repo_root / 'shared-supervisord.d'}",
-                "  commandTimeoutSeconds: 30",
+                "  commandTimeoutSeconds: 300",
                 "executor:",
                 "  type: local",
                 f"  inventoryPath: {repo_root / 'shared-inventory'}",
                 "  remoteUser: root",
-                "  timeoutSeconds: 30",
+                "  timeoutSeconds: 300",
             ]
         ),
         encoding="utf-8",
@@ -81,6 +81,8 @@ def test_load_settings_reads_dev_env_file(monkeypatch, tmp_path):
     assert settings.database.password == "dev#password"
     assert settings.auth.jwt_secret == "dev-secret-0123456789abcdef"
     assert settings.supervisor.conf_dir == (repo_root / "shared-supervisord.d").resolve()
+    assert settings.supervisor.command_timeout_seconds == 300
+    assert settings.executor.ansible_timeout_seconds == 300
 
 
 def test_load_settings_reads_prod_env_file(monkeypatch, tmp_path):

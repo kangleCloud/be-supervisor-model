@@ -92,7 +92,6 @@ class HostConfig:
     ip: str
     enabled: bool
     executor_type: str
-    ansible_pattern: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -226,14 +225,12 @@ def _load_hosts(config_data: Mapping[str, Any], default_executor_type: str) -> t
         executor_type = str(item.get("executorType") or default_executor_type).strip().lower()
         if executor_type not in {"local", "ansible"}:
             raise ValueError("host.executorType 只支持 local 或 ansible")
-        ansible_pattern = item.get("ansiblePattern")
         hosts.append(
             HostConfig(
                 name=name,
                 ip=ip,
                 enabled=bool(item.get("enabled", True)),
                 executor_type=executor_type,
-                ansible_pattern=str(ansible_pattern).strip() if ansible_pattern else None,
             )
         )
     return tuple(hosts)

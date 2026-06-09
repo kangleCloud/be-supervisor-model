@@ -22,12 +22,12 @@ def test_local_executor_uses_argument_list(monkeypatch):
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr("app.executor.local.subprocess.run", fake_run)
-    executor = LocalExecutor(30)
+    executor = LocalExecutor(300)
     result = executor.run_command(["supervisorctl", "status", "demo;rm"])
 
     assert result.success
     assert captured["command"] == ["supervisorctl", "status", "demo;rm"]
-    assert captured["timeout"] == 30
+    assert captured["timeout"] == 300
 
 
 def test_host_service_selects_ansible_executor(settings):

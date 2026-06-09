@@ -515,3 +515,45 @@ def test_api_success_response_keeps_cors_headers(client, seed_user):
     assert response.status_code == 200
     assert response.json()["code"] == 200
     _assert_cors_headers(response)
+
+
+def test_api_import_dry_run_prints_hostname_and_file_paths(client, test_environment, seed_user, capsys):
+    """验证 DRY_RUN 在服务端 stdout 输出 hostname 探测结果和文件路径。"""
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    (sub_dir / "legacy-name.ini").write_text(
+        test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc"),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    captured = capsys.readouterr().out
+    assert "[SUPERVISOR_IMPORT_DEBUG]" in captured
+    assert "host=127.0.0.1" in captured
+    assert "hostname=" in captured or "探测失败" in captured or "探测异常" in captured
+    assert "saas/legacy-name.ini" in captured
+
+
+def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
+    """验证远端无可读 *.ini 时返回 404，不会返回 200 + items=[]。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == 40400
+    assert response.json()["msg"] == "远端目录下无可用配置文件"
