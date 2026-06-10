@@ -20,6 +20,7 @@ ALLOWED_MANAGE_MODES = {MANAGE_MODE_TEMPLATE_MANAGED, MANAGE_MODE_IMPORTED_READO
 VALID_STATUS_VALUES = frozenset({
     "RUNNING", "STOPPED", "FATAL", "BACKOFF", "STARTING", "STOPPING", "EXITED", "UNKNOWN",
 })
+VALID_ARCHIVED_FILTERS = frozenset({"false", "true", "all"})
 
 ALLOWED_PAGE_SIZES = frozenset({10, 20, 50})
 
@@ -77,6 +78,9 @@ class SupervisorRegistryRecord:
     pid: str | None
     uptime: str | None
     status_sync_time: datetime | None
+    is_archived: bool
+    archived_at: datetime | None
+    restored_at: datetime | None
     update_time: datetime | None
 
 
@@ -96,7 +100,9 @@ class SupervisorRegistryService:
                     SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
                            baseline_content, metadata_complete, parse_warnings,
                            job_name, module_name, program_name, config_name,
-                           java_path, active_profile, port, jar_name, xms, xmx, run_user
+                           java_path, active_profile, port, jar_name, xms, xmx, run_user,
+                           status, pid, uptime, status_sync_time,
+                           is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s
                     ORDER BY id ASC
@@ -124,7 +130,9 @@ class SupervisorRegistryService:
                     SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
                            baseline_content, metadata_complete, parse_warnings,
                            job_name, module_name, program_name, config_name,
-                           java_path, active_profile, port, jar_name, xms, xmx, run_user
+                           java_path, active_profile, port, jar_name, xms, xmx, run_user,
+                           status, pid, uptime, status_sync_time,
+                           is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s AND program_name = %s
                     LIMIT 1
@@ -145,7 +153,9 @@ class SupervisorRegistryService:
                     SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
                            baseline_content, metadata_complete, parse_warnings,
                            job_name, module_name, program_name, config_name,
-                           java_path, active_profile, port, jar_name, xms, xmx, run_user
+                           java_path, active_profile, port, jar_name, xms, xmx, run_user,
+                           status, pid, uptime, status_sync_time,
+                           is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s AND config_path = %s
                     LIMIT 1
@@ -161,14 +171,18 @@ class SupervisorRegistryService:
         host: str | None = None,
         keyword: str | None = None,
         status: str | None = None,
+        archived: str = "false",
         page: int = 1,
         page_size: int = 10,
     ) -> tuple[list[SupervisorRegistryRecord], int, int]:
         """分页查询服务列表，返回 (records, total, pages)。"""
         safe_keyword = keyword.strip() if keyword else None
         safe_status = status.strip().upper() if status else None
+        safe_archived = archived.strip().lower()
         if safe_status is not None and safe_status not in VALID_STATUS_VALUES:
             raise ParamError(f"status 只支持 {', '.join(sorted(VALID_STATUS_VALUES))}")
+        if safe_archived not in VALID_ARCHIVED_FILTERS:
+            raise ParamError("archived 只支持 false、true 或 all")
 
         where_clauses: list[str] = []
         params: list[object] = []
@@ -191,6 +205,11 @@ class SupervisorRegistryService:
             where_clauses.append("status = %s")
             params.append(safe_status)
 
+        if safe_archived != "all":
+            # 列表默认只看未归档记录，避免历史归档项干扰日常运维视图。
+            where_clauses.append("is_archived = %s")
+            params.append(1 if safe_archived == "true" else 0)
+
         where_sql = ""
         if where_clauses:
             where_sql = f"WHERE {' AND '.join(where_clauses)}"
@@ -212,7 +231,8 @@ class SupervisorRegistryService:
                            baseline_content, metadata_complete, parse_warnings,
                            job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user,
-                           status, pid, uptime, status_sync_time, update_time
+                           status, pid, uptime, status_sync_time,
+                           is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     {where_sql}
                     ORDER BY update_time DESC, id DESC
@@ -224,6 +244,111 @@ class SupervisorRegistryService:
 
         pages = 0 if total == 0 else math.ceil(total / page_size)
         return [self._build_record(row) for row in rows], total, pages
+
+    def update_runtime_snapshot(
+        self,
+        host: str,
+        program_name: str,
+        *,
+        status: str,
+        pid: str | None,
+        uptime: str | None,
+    ) -> None:
+        """更新单服务运行时快照，供运行操作与还原流程复用。"""
+        safe_host = ensure_safe_host(host)
+        safe_program_name = ensure_safe_program_name(program_name)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET status = %s,
+                        pid = %s,
+                        uptime = %s,
+                        status_sync_time = %s
+                    WHERE host_ip = %s AND program_name = %s
+                    """,
+                    (status, pid, uptime, now_str, safe_host, safe_program_name),
+                )
+            connection.commit()
+
+    def mark_archived(
+        self,
+        host: str,
+        program_name: str,
+        *,
+        operator_id: int,
+        operator_name: str,
+        archived_at: datetime,
+    ) -> None:
+        """把服务标记为已归档，并同步停止态快照。"""
+        safe_host = ensure_safe_host(host)
+        safe_program_name = ensure_safe_program_name(program_name)
+        archived_at_str = archived_at.strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET is_archived = 1,
+                        archived_at = %s,
+                        status = 'STOPPED',
+                        pid = NULL,
+                        uptime = NULL,
+                        status_sync_time = %s,
+                        update_by_id = %s,
+                        update_by = %s
+                    WHERE host_ip = %s AND program_name = %s
+                    """,
+                    (archived_at_str, archived_at_str, operator_id, operator_name, safe_host, safe_program_name),
+                )
+            connection.commit()
+
+    def mark_restored(
+        self,
+        host: str,
+        program_name: str,
+        *,
+        operator_id: int,
+        operator_name: str,
+        restored_at: datetime,
+        status: str,
+        pid: str | None,
+        uptime: str | None,
+    ) -> None:
+        """把服务标记为未归档，并同步还原后的状态快照。"""
+        safe_host = ensure_safe_host(host)
+        safe_program_name = ensure_safe_program_name(program_name)
+        restored_at_str = restored_at.strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET is_archived = 0,
+                        restored_at = %s,
+                        status = %s,
+                        pid = %s,
+                        uptime = %s,
+                        status_sync_time = %s,
+                        update_by_id = %s,
+                        update_by = %s
+                    WHERE host_ip = %s AND program_name = %s
+                    """,
+                    (
+                        restored_at_str,
+                        status,
+                        pid,
+                        uptime,
+                        restored_at_str,
+                        operator_id,
+                        operator_name,
+                        safe_host,
+                        safe_program_name,
+                    ),
+                )
+            connection.commit()
 
     def batch_update_status(
         self,
@@ -523,6 +648,9 @@ class SupervisorRegistryService:
             pid=None,
             uptime=None,
             status_sync_time=None,
+            is_archived=False,
+            archived_at=None,
+            restored_at=None,
             update_time=None,
         )
 
@@ -552,6 +680,9 @@ class SupervisorRegistryService:
             pid=self._to_optional_str(row.get("pid")),
             uptime=self._to_optional_str(row.get("uptime")),
             status_sync_time=row.get("status_sync_time"),
+            is_archived=bool(row.get("is_archived", 0)),
+            archived_at=row.get("archived_at"),
+            restored_at=row.get("restored_at"),
             update_time=row.get("update_time"),
         )
 

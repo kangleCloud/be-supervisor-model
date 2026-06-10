@@ -169,6 +169,8 @@ class FakeMySQLServer:
     def __init__(self):
         self.databases: set[str] = set()
         self.tables: dict[str, list[dict[str, Any]]] = {}
+        self.table_columns: dict[str, set[str]] = {}
+        self.table_indexes: dict[str, set[str]] = {}
         self.auto_increment: dict[str, int] = {
             "sys_login_log": 1,
             "sys_login_token": 1,
@@ -181,6 +183,72 @@ class FakeMySQLServer:
 
     def connect_database(self):
         return FakeMySQLConnection(self, include_database=True)
+
+    def set_table_schema(
+        self,
+        table_name: str,
+        *,
+        columns: set[str] | None = None,
+        indexes: set[str] | None = None,
+    ) -> None:
+        """测试可显式指定表结构，模拟旧库缺列场景。"""
+        if columns is not None:
+            self.table_columns[table_name] = set(columns)
+        if indexes is not None:
+            self.table_indexes[table_name] = set(indexes)
+
+    @staticmethod
+    def _default_columns_for_table(table_name: str) -> set[str]:
+        if table_name == "sys_supervisor_service":
+            return {
+                "id",
+                "host_ip",
+                "config_path",
+                "file_name",
+                "content_program_name",
+                "manage_mode",
+                "baseline_content",
+                "metadata_complete",
+                "parse_warnings",
+                "job_name",
+                "module_name",
+                "program_name",
+                "config_name",
+                "java_path",
+                "active_profile",
+                "port",
+                "jar_name",
+                "xms",
+                "xmx",
+                "run_user",
+                "status",
+                "pid",
+                "uptime",
+                "status_sync_time",
+                "is_archived",
+                "archived_at",
+                "restored_at",
+                "create_time",
+                "update_time",
+                "create_by_id",
+                "create_by",
+                "update_by_id",
+                "update_by",
+                "remark",
+            }
+        return set()
+
+    @staticmethod
+    def _default_indexes_for_table(table_name: str) -> set[str]:
+        if table_name == "sys_supervisor_service":
+            return {
+                "uk_supervisor_host_config_path",
+                "idx_supervisor_host_program",
+                "idx_supervisor_host_manage_mode",
+                "idx_supervisor_host_archived",
+                "idx_supervisor_host_status",
+            }
+        return set()
 
     def seed_user(
         self,
@@ -246,6 +314,9 @@ class FakeMySQLServer:
         pid: str | None = None,
         uptime: str | None = None,
         status_sync_time: str | None = None,
+        is_archived: bool = False,
+        archived_at: str | None = None,
+        restored_at: str | None = None,
     ) -> None:
         self.tables.setdefault("sys_supervisor_service", [])
         record_id = self.auto_increment["sys_supervisor_service"]
@@ -281,6 +352,9 @@ class FakeMySQLServer:
                 pid=pid,
                 uptime=uptime,
                 status_sync_time=status_sync_time,
+                is_archived=is_archived,
+                archived_at=archived_at,
+                restored_at=restored_at,
             )
         )
 
@@ -316,6 +390,9 @@ class FakeMySQLServer:
         pid: str | None = None,
         uptime: str | None = None,
         status_sync_time: str | None = None,
+        is_archived: bool = False,
+        archived_at: str | None = None,
+        restored_at: str | None = None,
     ) -> dict[str, Any]:
         return {
             "id": record_id,
@@ -342,6 +419,9 @@ class FakeMySQLServer:
             "pid": pid,
             "uptime": uptime,
             "status_sync_time": status_sync_time,
+            "is_archived": 1 if is_archived else 0,
+            "archived_at": archived_at,
+            "restored_at": restored_at,
             "create_by_id": create_by_id,
             "create_by": create_by,
             "update_by_id": update_by_id,
@@ -362,12 +442,54 @@ class FakeMySQLServer:
         row.setdefault("pid", None)
         row.setdefault("uptime", None)
         row.setdefault("status_sync_time", None)
+        row.setdefault("is_archived", 0)
+        row.setdefault("archived_at", None)
+        row.setdefault("restored_at", None)
         row.setdefault("create_by_id", 0)
         row.setdefault("create_by", "system")
         row.setdefault("update_by_id", 0)
         row.setdefault("update_by", "system")
         row.setdefault("remark", "测试服务")
         return row
+
+    @staticmethod
+    def _filter_supervisor_rows(
+        rows: list[dict[str, Any]],
+        where_part: str,
+        params: tuple[Any, ...],
+    ) -> list[dict[str, Any]]:
+        prepared_rows = [dict(FakeMySQLServer._hydrate_supervisor_defaults(dict(row))) for row in rows]
+        filtered_rows = prepared_rows
+        param_idx = 0
+        for clause in [item.strip() for item in where_part.split(" AND ") if item.strip()]:
+            if clause == "host_ip = %s":
+                host_val = str(params[param_idx])
+                filtered_rows = [row for row in filtered_rows if str(row.get("host_ip", "")) == host_val]
+                param_idx += 1
+                continue
+            if clause.startswith("(program_name LIKE %s"):
+                keyword_val = str(params[param_idx]).replace("%", "").lower()
+                filtered_rows = [
+                    row for row in filtered_rows
+                    if keyword_val in str(row.get("program_name", "")).lower()
+                    or keyword_val in str(row.get("config_name", "")).lower()
+                    or keyword_val in str(row.get("job_name", "") or "").lower()
+                    or keyword_val in str(row.get("module_name", "") or "").lower()
+                    or keyword_val in str(row.get("port", "") or "")
+                ]
+                param_idx += 5
+                continue
+            if clause == "status = %s":
+                status_val = str(params[param_idx])
+                filtered_rows = [row for row in filtered_rows if row.get("status", "UNKNOWN") == status_val]
+                param_idx += 1
+                continue
+            if clause == "is_archived = %s":
+                archived_val = int(params[param_idx])
+                filtered_rows = [row for row in filtered_rows if int(row.get("is_archived", 0)) == archived_val]
+                param_idx += 1
+                continue
+        return filtered_rows
 
     @staticmethod
     def _matches_insert(normalized: str, table_name: str) -> bool:
@@ -389,15 +511,48 @@ class FakeMySQLServer:
         if normalized.startswith("CREATE TABLE IF NOT EXISTS"):
             table_name = normalized.split("`")[1] if "`" in normalized else normalized.split()[5]
             self.tables.setdefault(table_name, [])
+            self.table_columns.setdefault(table_name, self._default_columns_for_table(table_name))
+            self.table_indexes.setdefault(table_name, self._default_indexes_for_table(table_name))
             return 1
 
         if normalized.startswith("ALTER TABLE"):
-            # 迁移 002：snoozing ADD COLUMN 和 ADD KEY，虚拟表已对齐最新结构无需真正修改
+            table_name = normalized.split("`")[1] if "`" in normalized else normalized.split()[2]
+            columns = self.table_columns.setdefault(table_name, set())
+            indexes = self.table_indexes.setdefault(table_name, set())
+            if "ADD COLUMN `status`" in normalized:
+                columns.add("status")
+            if "ADD COLUMN `pid`" in normalized:
+                columns.add("pid")
+            if "ADD COLUMN `uptime`" in normalized:
+                columns.add("uptime")
+            if "ADD COLUMN `status_sync_time`" in normalized:
+                columns.add("status_sync_time")
+            if "ADD COLUMN `is_archived`" in normalized:
+                columns.add("is_archived")
+            if "ADD COLUMN `archived_at`" in normalized:
+                columns.add("archived_at")
+            if "ADD COLUMN `restored_at`" in normalized:
+                columns.add("restored_at")
+            if "ADD KEY `idx_supervisor_host_status`" in normalized:
+                indexes.add("idx_supervisor_host_status")
+            if "ADD KEY `idx_supervisor_host_archived`" in normalized:
+                indexes.add("idx_supervisor_host_archived")
             return 1
 
         if normalized == "SHOW TABLES LIKE %s":
             table_name = str(params[0])
             cursor.results = [{"table_name": table_name}] if table_name in self.tables else []
+            return len(cursor.results)
+
+        if normalized.startswith("SELECT 1 FROM information_schema.COLUMNS"):
+            _, table_name, column_name = params
+            columns = self.table_columns.get(str(table_name), set())
+            cursor.results = [{"1": 1}] if str(column_name) in columns else []
+            return len(cursor.results)
+
+        if normalized.startswith("SHOW INDEX FROM `"):
+            table_name = normalized.split("`")[1]
+            cursor.results = [{"Key_name": index_name} for index_name in sorted(self.table_indexes.get(table_name, set()))]
             return len(cursor.results)
 
         if normalized == "SELECT version FROM sys_schema_migration":
@@ -562,37 +717,15 @@ class FakeMySQLServer:
 
         if "FROM sys_supervisor_service" in normalized and "ORDER BY" in normalized:
             rows = list(self.tables.get("sys_supervisor_service", []))
-            # 解析 WHERE 条件参数（按出现顺序匹配 params）
-            param_idx = 0
             if "WHERE" in normalized:
                 where_part = normalized.split("WHERE")[1].split("ORDER BY")[0].strip()
-                # host_ip = %s
-                if "host_ip = %s" in where_part:
-                    host_val = str(params[param_idx])
-                    rows = [r for r in rows if str(r.get("host_ip", "")) == host_val]
-                    param_idx += 1
-                if "status = %s" in where_part:
-                    status_val = str(params[param_idx])
-                    rows = [r for r in rows if r.get("status", "UNKNOWN") == status_val]
-                    param_idx += 1
-                # keyword 模糊匹配
-                if "program_name LIKE %s" in where_part:
-                    keyword_pattern = str(params[param_idx]).replace("%", "").lower()
-                    param_idx += 5  # 5 个 LIKE 参数，全部用同一 pattern
-                    rows = [
-                        r for r in rows
-                        if keyword_pattern in str(r.get("program_name", "")).lower()
-                        or keyword_pattern in str(r.get("config_name", "")).lower()
-                        or keyword_pattern in str(r.get("job_name", "") or "").lower()
-                        or keyword_pattern in str(r.get("module_name", "") or "").lower()
-                        or keyword_pattern in str(r.get("port", "") or "")
-                    ]
-
-            rows = [dict(self._hydrate_supervisor_defaults(r)) for r in rows]
+                rows = self._filter_supervisor_rows(rows, where_part, params)
+            else:
+                rows = [dict(self._hydrate_supervisor_defaults(dict(row))) for row in rows]
             # 模拟 ORDER BY update_time DESC, id DESC — 对内存数据按 id 降序
             rows.sort(key=lambda r: -int(r.get("id", 0)))
-            # LIMIT 和 OFFSET 是 SQL 参数中的最后两个 int
-            if len(params) >= param_idx + 2:
+            has_limit = "LIMIT %s OFFSET %s" in normalized
+            if has_limit and len(params) >= 2:
                 limit_val = int(params[-2])
                 offset_val = int(params[-1])
                 rows = rows[offset_val:offset_val + limit_val]
@@ -714,28 +847,9 @@ class FakeMySQLServer:
 
         if normalized.startswith("SELECT COUNT(*) AS cnt FROM sys_supervisor_service"):
             rows = list(self.tables.get("sys_supervisor_service", []))
-            param_idx = 0
             if "WHERE" in normalized:
                 where_part = normalized.split("WHERE")[1].strip()
-                if "host_ip = %s" in where_part:
-                    host_val = str(params[param_idx]) if param_idx < len(params) else ""
-                    rows = [r for r in rows if str(r.get("host_ip", "")) == host_val]
-                    param_idx += 1
-                if "status = %s" in where_part:
-                    status_val = str(params[param_idx]) if param_idx < len(params) else ""
-                    rows = [r for r in rows if r.get("status", "UNKNOWN") == status_val]
-                    param_idx += 1
-                if "program_name LIKE %s" in where_part:
-                    keyword_val = str(params[param_idx]).replace("%", "").lower() if param_idx < len(params) else ""
-                    param_idx += 5
-                    rows = [
-                        r for r in rows
-                        if keyword_val in str(r.get("program_name", "")).lower()
-                        or keyword_val in str(r.get("config_name", "")).lower()
-                        or keyword_val in str(r.get("job_name", "") or "").lower()
-                        or keyword_val in str(r.get("module_name", "") or "").lower()
-                        or keyword_val in str(r.get("port", "") or "")
-                    ]
+                rows = self._filter_supervisor_rows(rows, where_part, params)
             cursor.results = [{"cnt": len(rows)}]
             return len(rows)
 
@@ -750,6 +864,44 @@ class FakeMySQLServer:
                 item["pid"] = str(pid) if pid is not None else None
                 item["uptime"] = str(uptime) if uptime is not None else None
                 item["status_sync_time"] = str(status_sync_time)
+                updated += 1
+            cursor.rowcount = updated
+            return updated
+
+        if normalized.startswith("UPDATE sys_supervisor_service SET is_archived = 1,"):
+            archived_at, status_sync_time, update_by_id, update_by, host_ip, program_name = params
+            updated = 0
+            for item in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(item)
+                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                    continue
+                item["is_archived"] = 1
+                item["archived_at"] = str(archived_at)
+                item["status"] = "STOPPED"
+                item["pid"] = None
+                item["uptime"] = None
+                item["status_sync_time"] = str(status_sync_time)
+                item["update_by_id"] = int(update_by_id)
+                item["update_by"] = str(update_by)
+                updated += 1
+            cursor.rowcount = updated
+            return updated
+
+        if normalized.startswith("UPDATE sys_supervisor_service SET is_archived = 0,"):
+            restored_at, status, pid, uptime, status_sync_time, update_by_id, update_by, host_ip, program_name = params
+            updated = 0
+            for item in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(item)
+                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                    continue
+                item["is_archived"] = 0
+                item["restored_at"] = str(restored_at)
+                item["status"] = str(status)
+                item["pid"] = str(pid) if pid is not None else None
+                item["uptime"] = str(uptime) if uptime is not None else None
+                item["status_sync_time"] = str(status_sync_time)
+                item["update_by_id"] = int(update_by_id)
+                item["update_by"] = str(update_by)
                 updated += 1
             cursor.rowcount = updated
             return updated

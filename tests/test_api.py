@@ -1,8 +1,43 @@
 """API 行为测试。"""
 from __future__ import annotations
 
+from pathlib import Path
+
+from app.executor.base import CommandResult, ExecutorRuntimeError
+from app.executor.local import LocalExecutor
+
 
 TEST_ORIGIN = "http://127.0.0.1:5173"
+
+
+class _FakeImportRemoteExecutor:
+    """只模拟导入链路需要的只读能力，避免单测依赖真实 ansible。"""
+
+    def __init__(
+        self,
+        *,
+        hostname_result: CommandResult | None = None,
+        config_paths: list[Path] | None = None,
+        file_contents: dict[Path, str] | None = None,
+        list_configs_error: Exception | None = None,
+    ) -> None:
+        self.hostname_result = hostname_result or CommandResult(("hostname",), 0, "fake-host", "")
+        self.config_paths = config_paths or []
+        self.file_contents = file_contents or {}
+        self.list_configs_error = list_configs_error
+
+    def run_command(self, command, timeout=None):  # noqa: ANN001, ARG002
+        return self.hostname_result
+
+    def list_configs(self, conf_dir: Path, *, recursive: bool = False, include_backups: bool = True) -> list[Path]:  # noqa: ARG002
+        if self.list_configs_error is not None:
+            raise self.list_configs_error
+        return list(self.config_paths)
+
+    def read_text(self, path: Path) -> str:
+        if path not in self.file_contents:
+            raise ExecutorRuntimeError(f"读取远程文件失败: {path}")
+        return self.file_contents[path]
 
 
 def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[str, object]:
@@ -38,6 +73,17 @@ def _login_headers(client) -> dict[str, str]:
     )
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['data']['accessToken']}"}
+
+
+def _force_remote_to_local_executor(monkeypatch, settings) -> None:
+    """把远端主机执行器切到本地假实现，复用测试目录和 fake supervisor。"""
+    from app.services.host_service import HostService
+
+    monkeypatch.setattr(
+        HostService,
+        "get_executor",
+        lambda self, host_value: LocalExecutor(settings.supervisor.command_timeout_seconds),
+    )
 
 
 def _assert_cors_headers(response, origin: str = TEST_ORIGIN) -> None:
@@ -576,6 +622,101 @@ def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
     assert response.json()["msg"] == "远端目录下无可用配置文件"
 
 
+def test_api_import_inventory_miss_returns_404(client, test_environment, seed_user, monkeypatch, capsys):
+    """验证导入前置 inventory 未匹配时返回 404。"""
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeImportRemoteExecutor(
+        hostname_result=CommandResult(("hostname",), 1, "", "目标主机未匹配: ansible inventory 中未找到 10.1.0.104"),
+        list_configs_error=ExecutorRuntimeError("目标主机未匹配: ansible inventory 中未找到 10.1.0.104"),
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == 40400
+    assert response.json()["msg"] == "目标主机未匹配"
+    captured = capsys.readouterr().out
+    assert "hostname 探测失败: 目标主机未匹配" in captured
+    assert "preflight_failed kind=inventory_miss" in captured
+
+
+def test_api_import_unreachable_returns_404(client, test_environment, seed_user, monkeypatch, capsys):
+    """验证导入前置 SSH/UNREACHABLE 失败时返回统一 404。"""
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeImportRemoteExecutor(
+        hostname_result=CommandResult(
+            ("hostname",),
+            4,
+            '{"msg": "Failed to connect to the host via ssh: Connection timed out"}',
+            "",
+        ),
+        list_configs_error=ExecutorRuntimeError("Failed to connect to the host via ssh: Connection timed out"),
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == 40400
+    assert response.json()["msg"] == "目标主机不可达"
+    captured = capsys.readouterr().out
+    assert "Connection timed out" in captured
+    assert "preflight_failed kind=unreachable" in captured
+
+
+def test_api_import_hostname_failure_does_not_block_success(client, test_environment, seed_user, monkeypatch, capsys):
+    """验证 hostname 探测失败只记诊断，不影响后续扫描成功。"""
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    config_path = conf_dir / "saas" / "legacy-name.ini"
+    config_path.parent.mkdir()
+    content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeImportRemoteExecutor(
+        hostname_result=CommandResult(
+            ("hostname",),
+            4,
+            '{"msg": "Failed to connect to the host via ssh: Connection timed out"}',
+            "",
+        ),
+        config_paths=[config_path],
+        file_contents={config_path: content},
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 0}
+    assert data["items"][0]["configPath"] == "saas/legacy-name.ini"
+    captured = capsys.readouterr().out
+    assert "hostname 探测失败" in captured
+    assert "Connection timed out" in captured
+    assert "导入汇总" in captured
+
+
 def test_api_import_skips_parse_error_and_continues(client, test_environment, seed_user, capsys):
     """验证解析失败的文件被 SKIPPED，其余文件正常处理。"""
     seed_user()
@@ -812,3 +953,235 @@ def test_api_status_refresh_caplus_chinese_log(client, test_environment, seed_us
 
     assert response.status_code == 200
     assert any("刷新服务状态" in record.message for record in caplog.records)
+
+
+def test_api_list_filters_archived_records(client, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="demo",
+        module_name="active",
+        program_name="demo_active",
+        config_name="active.ini",
+        is_archived=False,
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="demo",
+        module_name="archived",
+        program_name="demo_archived",
+        config_name="archived.ini",
+        is_archived=True,
+        archived_at="2026-06-10 10:00:00",
+    )
+
+    default_response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
+    archived_response = client.get(
+        "/admin/api/supervisor/services",
+        params={"host": "127.0.0.1", "archived": "true"},
+        headers=headers,
+    )
+    all_response = client.get(
+        "/admin/api/supervisor/services",
+        params={"host": "127.0.0.1", "archived": "all"},
+        headers=headers,
+    )
+
+    assert default_response.status_code == 200
+    assert [item["programName"] for item in default_response.json()["data"]["records"]] == ["demo_active"]
+    assert default_response.json()["data"]["records"][0]["isArchived"] is False
+
+    assert archived_response.status_code == 200
+    assert [item["programName"] for item in archived_response.json()["data"]["records"]] == ["demo_archived"]
+    assert archived_response.json()["data"]["records"][0]["isArchived"] is True
+
+    assert all_response.status_code == 200
+    assert [item["programName"] for item in all_response.json()["data"]["records"]] == ["demo_archived", "demo_active"]
+
+
+def test_api_detail_returns_archive_fields(client, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="legacy",
+        module_name="svc",
+        program_name="legacy_svc",
+        config_name="legacy.ini",
+        config_path="saas/legacy.ini",
+        file_name="legacy.ini",
+        manage_mode="IMPORTED_READONLY",
+        baseline_content="[program:legacy_svc]\ncommand=/bin/true\n",
+        metadata_complete=False,
+        is_archived=True,
+        archived_at="2026-06-10 10:00:00",
+        restored_at="2026-06-10 12:00:00",
+    )
+
+    response = client.get(
+        "/admin/api/supervisor/services/legacy_svc",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["isArchived"] is True
+    assert data["archivedAt"] == "2026-06-10 10:00:00"
+    assert data["restoredAt"] == "2026-06-10 12:00:00"
+    assert data["fileState"] == "MISSING"
+
+
+def test_api_runtime_actions_allow_ansible_and_update_snapshot(
+    client,
+    test_environment,
+    seed_user,
+    fake_mysql,
+    fake_supervisor,
+    monkeypatch,
+    settings,
+):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    conf_dir.joinpath("remote.ini").write_text(
+        test_environment["build_ini"]("remote_svc", 9300, job_name="remote", module_name="svc"),
+        encoding="utf-8",
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="10.1.0.104",
+        job_name="remote",
+        module_name="svc",
+        program_name="remote_svc",
+        config_name="remote.ini",
+        baseline_content=test_environment["build_ini"]("remote_svc", 9300, job_name="remote", module_name="svc"),
+    )
+    _force_remote_to_local_executor(monkeypatch, settings)
+
+    start_response = client.post(
+        "/admin/api/supervisor/services/remote_svc/start",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+    stop_response = client.post(
+        "/admin/api/supervisor/services/remote_svc/stop",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+    restart_response = client.post(
+        "/admin/api/supervisor/services/remote_svc/restart",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+
+    assert start_response.status_code == 200
+    assert start_response.json()["data"]["status"] == "RUNNING"
+    assert stop_response.status_code == 200
+    assert stop_response.json()["data"]["status"] == "STOPPED"
+    assert restart_response.status_code == 200
+    assert restart_response.json()["data"]["status"] == "RUNNING"
+    record = fake_mysql.tables["sys_supervisor_service"][0]
+    assert record["status"] == "RUNNING"
+    assert record["pid"] == "1"
+    assert record["uptime"] == "0:00:10"
+    assert fake_supervisor.states["remote_svc"] == "RUNNING"
+
+
+def test_api_runtime_actions_block_archived_service(client, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="10.1.0.104",
+        job_name="remote",
+        module_name="svc",
+        program_name="remote_archived",
+        config_name="remote_archived.ini",
+        is_archived=True,
+        archived_at="2026-06-10 10:00:00",
+    )
+
+    for action in ("start", "stop", "restart"):
+        response = client.post(
+            f"/admin/api/supervisor/services/remote_archived/{action}",
+            params={"host": "10.1.0.104"},
+            headers=headers,
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == 40910
+
+
+def test_api_archive_and_restore_remote_subdir_config(
+    client,
+    test_environment,
+    seed_user,
+    fake_mysql,
+    fake_supervisor,
+    monkeypatch,
+    settings,
+    caplog,
+):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    config_path = sub_dir / "remote-archive.ini"
+    content = test_environment["build_ini"]("remote_archive", 9400, job_name="remote", module_name="archive")
+    config_path.write_text(content, encoding="utf-8")
+    fake_supervisor.states["remote_archive"] = "RUNNING"
+    fake_mysql.seed_supervisor_service(
+        host_ip="10.1.0.104",
+        job_name="remote",
+        module_name="archive",
+        program_name="remote_archive",
+        config_name="remote-archive.ini",
+        config_path="saas/remote-archive.ini",
+        file_name="remote-archive.ini",
+        baseline_content=content,
+        port=9400,
+        run_user="root",
+    )
+    _force_remote_to_local_executor(monkeypatch, settings)
+
+    archive_response = client.post(
+        "/admin/api/supervisor/services/remote_archive/archive",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+
+    assert archive_response.status_code == 200
+    archive_data = archive_response.json()["data"]
+    assert archive_data["isArchived"] is True
+    assert archive_data["status"] == "STOPPED"
+    assert archive_data["fileResult"]["backup"]["configPath"] == "saas/remote-archive.ini"
+    assert not config_path.exists()
+    assert conf_dir.joinpath("saas/remote-archive.ini.bak").exists()
+    record = fake_mysql.tables["sys_supervisor_service"][0]
+    assert record["is_archived"] == 1
+    assert record["status"] == "STOPPED"
+
+    restore_response = client.post(
+        "/admin/api/supervisor/services/remote_archive/restore",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+
+    assert restore_response.status_code == 200
+    restore_data = restore_response.json()["data"]
+    assert restore_data["isArchived"] is False
+    assert config_path.exists()
+    assert fake_mysql.tables["sys_supervisor_service"][0]["is_archived"] == 0
+
+    start_response = client.post(
+        "/admin/api/supervisor/services/remote_archive/start",
+        params={"host": "10.1.0.104"},
+        headers=headers,
+    )
+    assert start_response.status_code == 200
+    assert start_response.json()["data"]["status"] == "RUNNING"
+    assert any("归档服务：目标主机=10.1.0.104，服务名称=remote_archive" in record.message for record in caplog.records)
+    assert any("还原服务成功：目标主机=10.1.0.104，服务名称=remote_archive" in record.message for record in caplog.records)

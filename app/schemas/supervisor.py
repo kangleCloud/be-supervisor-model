@@ -9,6 +9,15 @@ from app.core.exceptions import ParamError
 from app.core.security import ensure_safe_host, ensure_safe_name, ensure_valid_port
 
 
+def _format_datetime_text(value: object) -> str | None:
+    """兼容真实 MySQL datetime 和测试夹具中的字符串时间。"""
+    if value in (None, ""):
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
 class ServiceCreateRequest(BaseModel):
     """新增服务请求。"""
 
@@ -82,6 +91,7 @@ class ServiceListQuery(BaseModel):
     host: str | None = Field(default=None, description="目标主机 IP")
     keyword: str | None = Field(default=None, description="模糊搜索关键字")
     status: str | None = Field(default=None, description="按状态过滤")
+    archived: str = Field(default="false", description="归档筛选：false=未归档，true=已归档，all=全部")
     page: int = Field(default=1, ge=1, description="当前页码")
     page_size: int = Field(default=10, alias="pageSize", description="每页条数，只允许 10/20/50")
 
@@ -101,6 +111,14 @@ class ServiceListQuery(BaseModel):
             return ensure_safe_host(value)
         except ParamError as exc:
             raise ValueError(exc.msg) from exc
+
+    @field_validator("archived")
+    @classmethod
+    def validate_archived(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"false", "true", "all"}:
+            raise ValueError("archived 只允许 false、true 或 all")
+        return normalized
 
 
 class ServiceListRecord(BaseModel):
@@ -129,6 +147,9 @@ class ServiceListRecord(BaseModel):
     status: str = Field(default="UNKNOWN")
     pid: str | None = Field(default=None)
     uptime: str | None = Field(default=None)
+    is_archived: bool = Field(default=False, alias="isArchived")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
+    restored_at: str | None = Field(default=None, alias="restoredAt")
     update_time: str | None = Field(default=None, alias="updateTime")
 
     @classmethod
@@ -155,7 +176,10 @@ class ServiceListRecord(BaseModel):
             status=record.status,
             pid=record.pid,
             uptime=record.uptime,
-            updateTime=record.update_time.strftime("%Y-%m-%d %H:%M:%S") if record.update_time else None,
+            isArchived=record.is_archived,
+            archivedAt=_format_datetime_text(record.archived_at),
+            restoredAt=_format_datetime_text(record.restored_at),
+            updateTime=_format_datetime_text(record.update_time),
         )
 
 
@@ -180,3 +204,30 @@ class StatusRefreshResponse(BaseModel):
     total: int
     updated: int
     missing: int
+
+
+class RuntimeActionResponse(BaseModel):
+    """运行操作响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    program_name: str = Field(alias="programName")
+    action: str
+    status: str
+    command_result: dict[str, object] = Field(alias="commandResult")
+
+
+class ArchiveActionResponse(BaseModel):
+    """归档/还原响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    program_name: str = Field(alias="programName")
+    is_archived: bool = Field(alias="isArchived")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
+    restored_at: str | None = Field(default=None, alias="restoredAt")
+    status: str
+    command_result: dict[str, object] = Field(alias="commandResult")
+    file_result: dict[str, object] = Field(alias="fileResult")

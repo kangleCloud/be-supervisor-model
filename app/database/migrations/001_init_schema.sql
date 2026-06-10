@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     `pid` VARCHAR(32) DEFAULT NULL COMMENT '进程PID',
     `uptime` VARCHAR(64) DEFAULT NULL COMMENT '运行时长',
     `status_sync_time` DATETIME DEFAULT NULL COMMENT '最近状态同步时间',
+    `is_archived` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已归档 0否 1是',
+    `archived_at` DATETIME DEFAULT NULL COMMENT '归档时间',
+    `restored_at` DATETIME DEFAULT NULL COMMENT '最近还原时间',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新增时间',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `create_by_id` BIGINT DEFAULT NULL COMMENT '新增人ID',
@@ -112,6 +115,7 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`),
     KEY `idx_supervisor_host_program` (`host_ip`, `program_name`),
     KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`),
+    KEY `idx_supervisor_host_archived` (`host_ip`, `is_archived`),
     KEY `idx_supervisor_host_status` (`host_ip`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Supervisor服务主数据表';
 

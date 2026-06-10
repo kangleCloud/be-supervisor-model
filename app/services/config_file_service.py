@@ -66,8 +66,12 @@ class ConfigFileService:
         return Path(f"{config_path}.bak")
 
     def _ensure_remote_write_allowed(self, host: str) -> None:
-        """远端主机当前只允许读取配置，不允许通过本服务改动文件现场。"""
+        """仅供新增服务使用，保持“按 configName 直接写入”仍然只允许 local 主机。"""
         self.host_service.ensure_mutation_allowed(host, "当前项目禁止修改远端配置文件")
+
+    def _ensure_config_path_write_allowed(self, host: str) -> None:
+        """归档/还原允许对受控主机按 configPath 改动既有配置现场。"""
+        self.host_service.get_host(host)
 
     @staticmethod
     def _path_exists(executor, path: Path, error_msg: str) -> bool:
@@ -88,6 +92,11 @@ class ConfigFileService:
     def to_relative_config_path(self, path: Path) -> str:
         """把配置绝对路径转换成 confDir 下的安全相对路径。"""
         return self._relative_config_path(path)
+
+    def _relative_optional_path(self, path: str | None) -> str | None:
+        if path is None:
+            return None
+        return self._relative_config_path(Path(path))
 
     def _build_raw_config(self, path: Path, content: str) -> RawConfig:
         config_path = self._relative_config_path(path)
@@ -249,6 +258,31 @@ class ConfigFileService:
 
         return {"configPath": str(config_path), "backupPath": str(backup_path), "archivedBackupPath": archived_backup}
 
+    def backup_config_by_config_path(self, host: str, config_path: str) -> dict[str, str | None]:
+        """按相对路径创建或覆盖 .bak 备份，供归档流程复用。"""
+        self._ensure_config_path_write_allowed(host)
+        executor = self.host_service.get_executor(host)
+        absolute_path = self.build_config_path_from_relative(config_path)
+        backup_path = self._backup_path(absolute_path)
+        if not self._path_exists(executor, absolute_path, f"检查配置文件失败: {absolute_path.name}"):
+            raise ConfigNotFoundError(f"配置文件不存在: {config_path}")
+
+        archived_backup: str | None = None
+        try:
+            if self._path_exists(executor, backup_path, f"检查备份文件失败: {backup_path.name}"):
+                archived_backup_path = Path(f"{backup_path}.{self._timestamp_suffix()}")
+                executor.move_file(backup_path, archived_backup_path)
+                archived_backup = str(archived_backup_path)
+            executor.copy_file(absolute_path, backup_path)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"备份配置失败: {config_path}") from exc
+
+        return {
+            "configPath": self._relative_config_path(absolute_path),
+            "backupPath": self._relative_config_path(backup_path),
+            "archivedBackupPath": self._relative_optional_path(archived_backup),
+        }
+
     def restore_config(self, host: str, config_name: str, program_name: str | None = None) -> dict[str, str | None]:
         """从 .bak 还原配置。"""
         self._ensure_remote_write_allowed(host)
@@ -269,6 +303,31 @@ class ConfigFileService:
             raise FileOperationError(f"还原配置失败: {config_path.name}") from exc
 
         return {"configPath": str(config_path), "backupPath": str(backup_path), "archivedCurrentPath": archived_current}
+
+    def restore_config_by_config_path(self, host: str, config_path: str) -> dict[str, str | None]:
+        """按相对路径从 .bak 还原配置，供归档恢复流程复用。"""
+        self._ensure_config_path_write_allowed(host)
+        executor = self.host_service.get_executor(host)
+        absolute_path = self.build_config_path_from_relative(config_path)
+        backup_path = self._backup_path(absolute_path)
+        if not self._path_exists(executor, backup_path, f"检查备份文件失败: {backup_path.name}"):
+            raise ConfigNotFoundError(f"备份文件不存在: {config_path}.bak")
+
+        archived_current: str | None = None
+        try:
+            if self._path_exists(executor, absolute_path, f"检查配置文件失败: {absolute_path.name}"):
+                archived_current_path = Path(f"{absolute_path}.{self._timestamp_suffix()}")
+                executor.move_file(absolute_path, archived_current_path)
+                archived_current = str(archived_current_path)
+            executor.copy_file(backup_path, absolute_path)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"还原配置失败: {config_path}") from exc
+
+        return {
+            "configPath": self._relative_config_path(absolute_path),
+            "backupPath": self._relative_config_path(backup_path),
+            "archivedCurrentPath": self._relative_optional_path(archived_current),
+        }
 
     def delete_config(
         self,
@@ -293,3 +352,27 @@ class ConfigFileService:
         except ExecutorRuntimeError as exc:
             raise FileOperationError(f"删除配置失败: {config_path.name}") from exc
         return {"configPath": str(config_path), "removedBackupPath": removed_backup}
+
+    def delete_config_by_config_path(
+        self,
+        host: str,
+        config_path: str,
+        *,
+        delete_backup: bool = False,
+    ) -> dict[str, str | None]:
+        """按相对路径删除主配置文件，归档流程固定用数据库中的 configPath。"""
+        self._ensure_config_path_write_allowed(host)
+        executor = self.host_service.get_executor(host)
+        absolute_path = self.build_config_path_from_relative(config_path)
+        backup_path = self._backup_path(absolute_path)
+        if not self._path_exists(executor, absolute_path, f"检查配置文件失败: {absolute_path.name}"):
+            raise ConfigNotFoundError(f"配置文件不存在: {config_path}")
+        try:
+            executor.remove_file(absolute_path)
+            removed_backup = None
+            if delete_backup and self._path_exists(executor, backup_path, f"检查备份文件失败: {backup_path.name}"):
+                executor.remove_file(backup_path)
+                removed_backup = self._relative_config_path(backup_path)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"删除配置失败: {config_path}") from exc
+        return {"configPath": self._relative_config_path(absolute_path), "removedBackupPath": removed_backup}

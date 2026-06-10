@@ -19,6 +19,65 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "database" / "migrations"
 REQUIRED_TABLE_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: ("sys_user", "sys_login_log", "sys_login_token", "sys_supervisor_service"),
 }
+LEGACY_RUNTIME_MIGRATION_VERSION = 2
+LEGACY_RUNTIME_MIGRATION_NAME = "002_add_supervisor_service_runtime_columns.sql"
+LEGACY_ARCHIVE_MIGRATION_VERSION = 3
+LEGACY_ARCHIVE_MIGRATION_NAME = "003_add_supervisor_archive_columns.sql"
+SUPERVISOR_SERVICE_TABLE = "sys_supervisor_service"
+SUPERVISOR_RUNTIME_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "status",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `status` VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN' "
+        "COMMENT '运行状态快照：RUNNING/STOPPED/FATAL/BACKOFF/STARTING/STOPPING/EXITED/UNKNOWN' "
+        "AFTER `run_user`",
+    ),
+    (
+        "pid",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `pid` VARCHAR(32) DEFAULT NULL COMMENT '进程PID' AFTER `status`",
+    ),
+    (
+        "uptime",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `uptime` VARCHAR(64) DEFAULT NULL COMMENT '运行时长' AFTER `pid`",
+    ),
+    (
+        "status_sync_time",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `status_sync_time` DATETIME DEFAULT NULL COMMENT '最近状态同步时间' AFTER `uptime`",
+    ),
+)
+SUPERVISOR_RUNTIME_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "idx_supervisor_host_status",
+        "ALTER TABLE `sys_supervisor_service` ADD KEY `idx_supervisor_host_status` (`host_ip`, `status`)",
+    ),
+)
+SUPERVISOR_ARCHIVE_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "is_archived",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `is_archived` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已归档 0否 1是' "
+        "AFTER `status_sync_time`",
+    ),
+    (
+        "archived_at",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `archived_at` DATETIME DEFAULT NULL COMMENT '归档时间' AFTER `is_archived`",
+    ),
+    (
+        "restored_at",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `restored_at` DATETIME DEFAULT NULL COMMENT '最近还原时间' AFTER `archived_at`",
+    ),
+)
+SUPERVISOR_ARCHIVE_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "idx_supervisor_host_archived",
+        "ALTER TABLE `sys_supervisor_service` ADD KEY `idx_supervisor_host_archived` (`host_ip`, `is_archived`)",
+    ),
+)
 
 
 def _connect(settings: Settings, *, include_database: bool) -> Connection:
@@ -83,7 +142,7 @@ def initialize_database(settings: Settings) -> None:
             for version, migration_path in migrations:
                 if version in applied_versions:
                     continue
-                _execute_script(cursor, migration_path.read_text(encoding="utf-8"))
+                _apply_migration(cursor, settings, version, migration_path)
                 cursor.execute(
                     "INSERT INTO sys_schema_migration(version, name) VALUES (%s, %s)",
                     (version, migration_path.name),
@@ -128,6 +187,49 @@ def _execute_script(cursor: Cursor, script: str) -> None:
         cursor.execute(statement)
 
 
+def _apply_migration(cursor: Cursor, settings: Settings, version: int, migration_path: Path) -> None:
+    """兼容旧库升级迁移，避免新库重复补列。"""
+    if version == LEGACY_RUNTIME_MIGRATION_VERSION and migration_path.name == LEGACY_RUNTIME_MIGRATION_NAME:
+        _apply_supervisor_runtime_columns_migration(cursor, settings.database.database)
+        return
+    if version == LEGACY_ARCHIVE_MIGRATION_VERSION and migration_path.name == LEGACY_ARCHIVE_MIGRATION_NAME:
+        _apply_supervisor_archive_columns_migration(cursor, settings.database.database)
+        return
+    _execute_script(cursor, migration_path.read_text(encoding="utf-8"))
+
+
+def _apply_supervisor_runtime_columns_migration(cursor: Cursor, database_name: str) -> None:
+    """仅在旧库缺少运行时字段时补建，避免新库重复 ADD COLUMN。"""
+    if not _table_exists(cursor, SUPERVISOR_SERVICE_TABLE):
+        return
+
+    for column_name, statement in SUPERVISOR_RUNTIME_COLUMNS:
+        if _column_exists(cursor, database_name, SUPERVISOR_SERVICE_TABLE, column_name):
+            continue
+        cursor.execute(statement)
+
+    for index_name, statement in SUPERVISOR_RUNTIME_INDEXES:
+        if _index_exists(cursor, SUPERVISOR_SERVICE_TABLE, index_name):
+            continue
+        cursor.execute(statement)
+
+
+def _apply_supervisor_archive_columns_migration(cursor: Cursor, database_name: str) -> None:
+    """仅在旧库缺少归档字段时补建，避免新库重复 ADD COLUMN。"""
+    if not _table_exists(cursor, SUPERVISOR_SERVICE_TABLE):
+        return
+
+    for column_name, statement in SUPERVISOR_ARCHIVE_COLUMNS:
+        if _column_exists(cursor, database_name, SUPERVISOR_SERVICE_TABLE, column_name):
+            continue
+        cursor.execute(statement)
+
+    for index_name, statement in SUPERVISOR_ARCHIVE_INDEXES:
+        if _index_exists(cursor, SUPERVISOR_SERVICE_TABLE, index_name):
+            continue
+        cursor.execute(statement)
+
+
 def _ensure_required_tables(cursor: Cursor, migrations: list[tuple[int, Path]]) -> None:
     """校验关键业务表存在，缺表时重放单基线 SQL 补建。"""
     for version, table_names in REQUIRED_TABLE_MIGRATIONS.items():
@@ -158,6 +260,25 @@ def _find_missing_tables(cursor: Cursor, table_names: tuple[str, ...]) -> list[s
 def _table_exists(cursor: Cursor, table_name: str) -> bool:
     cursor.execute("SHOW TABLES LIKE %s", (table_name,))
     return cursor.fetchone() is not None
+
+
+def _column_exists(cursor: Cursor, database_name: str, table_name: str, column_name: str) -> bool:
+    cursor.execute(
+        """
+        SELECT 1
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        LIMIT 1
+        """,
+        (database_name, table_name, column_name),
+    )
+    return cursor.fetchone() is not None
+
+
+def _index_exists(cursor: Cursor, table_name: str, index_name: str) -> bool:
+    # 索引名来自受控常量，使用 SHOW INDEX 与真实 MySQL 保持一致。
+    cursor.execute(f"SHOW INDEX FROM `{table_name}`")
+    return any((row.get("Key_name") or row.get("key_name")) == index_name for row in cursor.fetchall())
 
 
 def _find_migration_path(migrations: list[tuple[int, Path]], version: int) -> Path | None:

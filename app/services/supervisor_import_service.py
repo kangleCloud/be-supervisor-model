@@ -29,6 +29,22 @@ IMPORT_RESULT_UPDATED = "UPDATED"
 IMPORT_RESULT_SKIPPED = "SKIPPED"
 
 IMPORT_REMARK = "初始化导入 Supervisor 只读快照"
+IMPORT_PREFLIGHT_KIND_INVENTORY_MISS = "inventory_miss"
+IMPORT_PREFLIGHT_KIND_UNREACHABLE = "unreachable"
+IMPORT_PREFLIGHT_KIND_EMPTY_DIR = "empty_dir"
+IMPORT_PREFLIGHT_KIND_READ_ERROR = "read_error"
+_IMPORT_UNREACHABLE_MARKERS = (
+    "unreachable",
+    "failed to connect",
+    "connection timed out",
+    "connection refused",
+    "permission denied",
+    "host key verification failed",
+    "could not resolve hostname",
+    "authentication failed",
+    "ansible 命令执行超时",
+    "ssh",
+)
 
 
 @dataclass(frozen=True)
@@ -122,7 +138,9 @@ def _print_hostname_diagnostic(host: str, executor_type: str, executor) -> None:
         if result.success:
             print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname={result.stdout.strip()}")
         else:
-            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测失败: {result.stderr.strip() or 'unknown error'}")
+            # hostname 探测只用于诊断，失败时优先打印 ansible 解析出的真实根因，不能退化成 unknown error。
+            error_text = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测失败: {error_text}")
     except ExecutorRuntimeError as exc:
         print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测异常: {exc}")
 
@@ -135,6 +153,24 @@ def _print_config_paths_diagnostic(config_paths: list[str]) -> None:
     print(f"[SUPERVISOR_IMPORT_DEBUG] 发现 {len(config_paths)} 个配置文件:")
     for path in config_paths:
         print(f"  configPath={path}, fileName={PurePosixPath(path).name}")
+
+
+def _detect_preflight_failure_kind(message: str) -> str:
+    """导入前置扫描只收敛为少数几类诊断，便于 API 稳定映射状态码。"""
+    normalized = message.lower()
+    if "目标主机未匹配" in message or "could not match supplied host pattern" in normalized or "no hosts matched" in normalized:
+        return IMPORT_PREFLIGHT_KIND_INVENTORY_MISS
+    if any(marker in normalized for marker in _IMPORT_UNREACHABLE_MARKERS):
+        return IMPORT_PREFLIGHT_KIND_UNREACHABLE
+    return IMPORT_PREFLIGHT_KIND_READ_ERROR
+
+
+def _print_preflight_failure_diagnostic(host: str, executor_type: str, kind: str, message: str) -> None:
+    """统一输出前置扫描失败分类，便于从服务端日志直接判断失败类型。"""
+    print(
+        f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, "
+        f"preflight_failed kind={kind}: {message}"
+    )
 
 
 def _diagnostic_finish_and_return(prefix: str, start_time: float, item: SupervisorImportItem) -> SupervisorImportItem:
@@ -171,21 +207,37 @@ class SupervisorImportService:
         """执行单主机初始化导入，返回逐文件结果。"""
         overall_start = time.time()
         normalized_mode = self._normalize_mode(mode)
-        safe_host = self.host_service.get_host(host).ip
+        host_config = self.host_service.get_host(host)
+        safe_host = host_config.ip
         executor = self.host_service.get_executor(safe_host)
-        _print_hostname_diagnostic(safe_host, self.host_service.get_host(safe_host).executor_type, executor)
+        _print_hostname_diagnostic(safe_host, host_config.executor_type, executor)
 
-        config_paths = sorted(
-            self.config_file_service.to_relative_config_path(path)
-            for path in self.config_file_service.list_config_paths(
-                safe_host,
-                include_backups=False,
-                recursive=recursive,
+        try:
+            config_paths = sorted(
+                self.config_file_service.to_relative_config_path(path)
+                for path in self.config_file_service.list_config_paths(
+                    safe_host,
+                    include_backups=False,
+                    recursive=recursive,
+                )
             )
-        )
+        except FileOperationError as exc:
+            kind = _detect_preflight_failure_kind(exc.msg)
+            _print_preflight_failure_diagnostic(safe_host, host_config.executor_type, kind, exc.msg)
+            if kind == IMPORT_PREFLIGHT_KIND_INVENTORY_MISS:
+                raise ConfigNotFoundError("目标主机未匹配") from exc
+            if kind == IMPORT_PREFLIGHT_KIND_UNREACHABLE:
+                raise ConfigNotFoundError("目标主机不可达") from exc
+            raise
+
         _print_config_paths_diagnostic(config_paths)
         if not config_paths:
-            print("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置，返回失败")
+            _print_preflight_failure_diagnostic(
+                safe_host,
+                host_config.executor_type,
+                IMPORT_PREFLIGHT_KIND_EMPTY_DIR,
+                "远端目录下无可用配置文件",
+            )
             raise ConfigNotFoundError("远端目录下无可用配置文件")
 
         total = len(config_paths)

@@ -17,9 +17,11 @@ from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.port_check_service import PortCheckService
+from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_manager import SupervisorManager
 from app.services.supervisor_registry_service import SupervisorRegistryService
+from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
 from app.services.template_service import TemplateService
 
@@ -41,6 +43,8 @@ def get_manager() -> SupervisorManager:
     supervisor_service = SupervisorService(host_service)
     registry_service = SupervisorRegistryService(settings)
     import_service = SupervisorImportService(host_service, config_file_service, template_service, registry_service)
+    runtime_service = SupervisorRuntimeService(host_service, registry_service, supervisor_service)
+    archive_service = SupervisorArchiveService(host_service, config_file_service, registry_service, supervisor_service)
     return SupervisorManager(
         host_service,
         template_service,
@@ -49,6 +53,8 @@ def get_manager() -> SupervisorManager:
         supervisor_service,
         registry_service,
         import_service,
+        runtime_service,
+        archive_service,
     )
 
 
@@ -130,3 +136,78 @@ def refresh_service_status(
     current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
 ):
     return ok(manager.refresh_status(host), msg="刷新服务状态成功")
+
+
+@router.post(
+    "/services/{program_name}/start",
+    summary="启动 Supervisor 服务",
+    description="对指定主机上的纳管服务执行 supervisorctl start，并在成功后刷新数据库状态快照。",
+    response_description="运行操作结果。",
+)
+def start_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.start_service(host, program_name, current_user), msg="启动服务成功")
+
+
+@router.post(
+    "/services/{program_name}/stop",
+    summary="停止 Supervisor 服务",
+    description="对指定主机上的纳管服务执行 supervisorctl stop，并在成功后刷新数据库状态快照。",
+    response_description="运行操作结果。",
+)
+def stop_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.stop_service(host, program_name, current_user), msg="停止服务成功")
+
+
+@router.post(
+    "/services/{program_name}/restart",
+    summary="重启 Supervisor 服务",
+    description="对指定主机上的纳管服务执行 supervisorctl restart，并在成功后刷新数据库状态快照。",
+    response_description="运行操作结果。",
+)
+def restart_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.restart_service(host, program_name, current_user), msg="重启服务成功")
+
+
+@router.post(
+    "/services/{program_name}/archive",
+    summary="归档 Supervisor 服务",
+    description="先停止服务，再备份并删除远端配置文件，随后执行 reread/update，最后把数据库记录标记为已归档。",
+    response_description="归档结果。",
+)
+def archive_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.archive_service(host, program_name, current_user), msg="归档服务成功")
+
+
+@router.post(
+    "/services/{program_name}/restore",
+    summary="还原 Supervisor 服务",
+    description="从归档备份恢复远端配置文件，执行 reread/update，并同步数据库状态；不会自动启动服务。",
+    response_description="还原结果。",
+)
+def restore_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.restore_service(host, program_name, current_user), msg="还原服务成功")

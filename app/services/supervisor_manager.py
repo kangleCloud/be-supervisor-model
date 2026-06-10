@@ -16,6 +16,7 @@ from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.supervisor_import_service import SupervisorImportService
+from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.port_check_service import PortCheckService
 from app.services.supervisor_registry_service import (
     MANAGE_MODE_IMPORTED_READONLY,
@@ -24,6 +25,7 @@ from app.services.supervisor_registry_service import (
     SupervisorRegistryRecord,
     SupervisorRegistryService,
 )
+from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
 from app.services.template_service import TemplateService
 
@@ -32,6 +34,15 @@ LOGGER = logging.getLogger(__name__)
 FILE_STATE_MATCH = "MATCH"
 FILE_STATE_MISSING = "MISSING"
 FILE_STATE_MISMATCH = "MISMATCH"
+
+
+def _format_datetime_text(value: object) -> str | None:
+    """兼容真实 MySQL datetime 和测试夹具中的字符串时间。"""
+    if value in (None, ""):
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
 
 
 class SupervisorManager:
@@ -46,6 +57,8 @@ class SupervisorManager:
         supervisor_service: SupervisorService,
         registry_service: SupervisorRegistryService,
         import_service: SupervisorImportService,
+        runtime_service: SupervisorRuntimeService,
+        archive_service: SupervisorArchiveService,
     ):
         self.host_service = host_service
         self.template_service = template_service
@@ -54,6 +67,8 @@ class SupervisorManager:
         self.supervisor_service = supervisor_service
         self.registry_service = registry_service
         self.import_service = import_service
+        self.runtime_service = runtime_service
+        self.archive_orchestrator = archive_service
 
     def list_hosts(self) -> list[dict[str, object]]:
         """返回允许的主机列表。"""
@@ -62,13 +77,14 @@ class SupervisorManager:
     def list_services_page(self, query: ServiceListQuery) -> dict[str, object]:
         """纯数据库分页查询服务列表，不触发任何远端命令。"""
         LOGGER.info(
-            "查询服务列表：目标主机=%s，关键字=%s，状态=%s，当前页=%s，每页条数=%s",
-            query.host, query.keyword, query.status, query.page, query.page_size,
+            "查询服务列表：目标主机=%s，关键字=%s，状态=%s，归档筛选=%s，当前页=%s，每页条数=%s",
+            query.host, query.keyword, query.status, query.archived, query.page, query.page_size,
         )
         records, total, pages = self.registry_service.search_page(
             host=query.host,
             keyword=query.keyword,
             status=query.status,
+            archived=query.archived,
             page=query.page,
             page_size=query.page_size,
         )
@@ -180,6 +196,36 @@ class SupervisorManager:
         )
         return report.to_dict()
 
+    def start_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """启动单个服务并刷新数据库状态快照。"""
+        return self.runtime_service.start_service(host, program_name)
+
+    def stop_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """停止单个服务并刷新数据库状态快照。"""
+        return self.runtime_service.stop_service(host, program_name)
+
+    def restart_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """重启单个服务并刷新数据库状态快照。"""
+        return self.runtime_service.restart_service(host, program_name)
+
+    def archive_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """归档服务并联动远端配置文件现场。"""
+        return self.archive_orchestrator.archive_service(
+            host,
+            program_name,
+            operator_id=current_user.user_id,
+            operator_name=current_user.username,
+        )
+
+    def restore_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """还原归档服务配置，但不自动启动。"""
+        return self.archive_orchestrator.restore_service(
+            host,
+            program_name,
+            operator_id=current_user.user_id,
+            operator_name=current_user.username,
+        )
+
     def _render_expected_content(self, record: SupervisorRegistryRecord) -> str:
         """详情与漂移判断要区分模板纳管与只读导入快照。"""
         if record.manage_mode == MANAGE_MODE_IMPORTED_READONLY:
@@ -273,4 +319,7 @@ class SupervisorManager:
             "user": record.run_user,
             "status": status,
             "fileState": file_state,
+            "isArchived": record.is_archived,
+            "archivedAt": _format_datetime_text(record.archived_at),
+            "restoredAt": _format_datetime_text(record.restored_at),
         }

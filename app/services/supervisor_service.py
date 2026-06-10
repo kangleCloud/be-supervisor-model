@@ -28,10 +28,12 @@ class SupervisorStatus:
     uptime: Optional[str]
     raw: str
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "programName": self.program_name,
             "state": self.state,
+            "pid": self.pid,
+            "uptime": self.uptime,
             "raw": self.raw,
         }
 
@@ -43,8 +45,8 @@ class SupervisorService:
         self.host_service = host_service
 
     def _ensure_remote_command_allowed(self, host: str) -> None:
-        """远端主机当前只允许查状态，不允许触发生效或启停命令。"""
-        self.host_service.ensure_mutation_allowed(host, "当前项目禁止操作远端 Supervisor")
+        """运行操作允许 local/ansible，共同前提只有主机必须在白名单内。"""
+        self.host_service.get_host(host)
 
     def status(self, host: str, program_name: Optional[str] = None) -> list[SupervisorStatus]:
         """查询服务状态。"""

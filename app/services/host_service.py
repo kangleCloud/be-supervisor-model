@@ -38,7 +38,7 @@ class HostService:
         raise InvalidHostError()
 
     def ensure_mutation_allowed(self, host_value: str, forbidden_msg: str) -> HostConfig:
-        """当前项目约束：远端 ansible 主机只允许读，不允许通过服务端改现场。"""
+        """仅供“新增服务”这类 local-only 操作复用，远端能力是否放开由具体业务服务决定。"""
         host = self.get_host(host_value)
         if host.executor_type == "ansible":
             raise ForbiddenOperationError(forbidden_msg)

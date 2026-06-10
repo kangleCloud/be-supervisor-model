@@ -71,6 +71,20 @@ class ConfigAlreadyExistsError(AppError):
         super().__init__(409, 40900, msg, data)
 
 
+class ArchivedServiceOperationError(AppError):
+    """归档服务禁止执行运行操作。"""
+
+    def __init__(self, msg: str = "服务已归档，不能执行启动、停止或重启操作", data: Any = None):
+        super().__init__(409, 40910, msg, data)
+
+
+class ArchiveStateError(AppError):
+    """归档 / 还原状态不满足前置条件。"""
+
+    def __init__(self, msg: str, data: Any = None):
+        super().__init__(409, 40911, msg, data)
+
+
 class InternalError(AppError):
     """内部错误。"""
 
