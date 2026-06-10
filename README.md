@@ -236,9 +236,10 @@ pip install -r requirements.txt
 - `POST /admin/api/auth/logout`
 - `GET /admin/api/supervisor/hosts`
 - `POST /admin/api/supervisor/imports`
-- `GET /admin/api/supervisor/services?host=127.0.0.1`
-- `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`
-- `POST /admin/api/supervisor/services`
+- `GET /admin/api/supervisor/services?host=&keyword=&status=&page=&pageSize=`（分页查询，纯数据库，不触发远端命令）
+- `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`（详情，实时读取远端状态与文件）
+- `POST /admin/api/supervisor/services`（仅限 local 主机新增）
+- `POST /admin/api/supervisor/services/status/refresh?host=127.0.0.1`（批量刷新状态快照）
 
 ## 跨域访问说明
 

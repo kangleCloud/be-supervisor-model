@@ -83,18 +83,20 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert create_data["metadataComplete"] is True
     assert create_data["parseWarnings"] == []
     assert create_data["fileState"] == "MATCH"
-    assert create_data["status"]["state"] == "STOPPED"
+    assert create_data["status"] is None
     assert (conf_dir / "demo-project_member.ini").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
 
     list_response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
     assert list_response.status_code == 200
     list_data = list_response.json()["data"]
-    assert len(list_data) == 1
-    assert list_data[0]["programName"] == "demo-project_member"
-    assert list_data[0]["configPath"] == "demo-project_member.ini"
-    assert list_data[0]["fileState"] == "MATCH"
-    assert list_data[0]["status"]["state"] == "STOPPED"
+    assert list_data["total"] == 1
+    assert list_data["page"] == 1
+    assert list_data["pageSize"] == 10
+    assert len(list_data["records"]) == 1
+    assert list_data["records"][0]["programName"] == "demo-project_member"
+    assert list_data["records"][0]["configPath"] == "demo-project_member.ini"
+    assert list_data["records"][0]["status"] == "UNKNOWN"
 
     detail_response = client.get(
         "/admin/api/supervisor/services/demo-project_member",
@@ -122,7 +124,12 @@ def test_api_list_uses_database_as_source(client, test_environment, seed_user):
     response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
 
     assert response.status_code == 200
-    assert response.json()["data"] == []
+    data = response.json()["data"]
+    assert data["records"] == []
+    assert data["total"] == 0
+    assert data["page"] == 1
+    assert data["pageSize"] == 10
+    assert data["pages"] == 0
 
 
 def test_api_reports_missing_remote_file(client, test_environment, seed_user):
@@ -605,3 +612,203 @@ def test_api_import_skips_parse_error_and_continues(client, test_environment, se
     assert "导入汇总" in captured
     assert "planned=1" in captured
     assert "skipped=1" in captured
+
+
+def test_api_list_pagination_defaults(client, test_environment, seed_user, fake_mysql):
+    """验证列表分页默认 page=1, pageSize=10。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["page"] == 1
+    assert data["pageSize"] == 10
+    assert data["pages"] == 0
+    assert data["total"] == 0
+    assert data["records"] == []
+
+
+def test_api_list_pagination_page_size_20(client, test_environment, seed_user, fake_mysql):
+    """验证 pageSize=20 正常工作。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "pageSize": "20"}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["pageSize"] == 20
+
+
+def test_api_list_rejects_invalid_page_size(client, test_environment, seed_user):
+    """验证非法 pageSize 返回 422。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "pageSize": "5"}, headers=headers)
+
+    # 自定义验证错误处理器返回 400 而非默认 422
+    assert response.status_code == 400
+
+
+def test_api_list_rejects_page_below_one(client, test_environment, seed_user):
+    """验证 page < 1 返回 422。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "page": "0"}, headers=headers)
+
+    assert response.status_code == 400
+
+
+def test_api_list_filters_by_status(client, test_environment, seed_user, fake_mysql):
+    """验证 status 过滤。"""
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="a", program_name="demo_a",
+        config_name="a.ini", status="RUNNING", pid="12345", uptime="0:10:00",
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="b", program_name="demo_b",
+        config_name="b.ini", status="STOPPED",
+    )
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "status": "RUNNING"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert data["records"][0]["programName"] == "demo_a"
+    assert data["records"][0]["status"] == "RUNNING"
+    assert data["records"][0]["pid"] == "12345"
+    assert data["records"][0]["uptime"] == "0:10:00"
+
+
+def test_api_list_filters_by_keyword(client, test_environment, seed_user, fake_mysql):
+    """验证 keyword 模糊匹配。"""
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="project-a", module_name="member", program_name="project-a_member",
+        config_name="project-a_member.ini",
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="project-b", module_name="order", program_name="project-b_order",
+        config_name="project-b_order.ini",
+    )
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "keyword": "member"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["total"] == 1
+    assert data["records"][0]["programName"] == "project-a_member"
+
+
+def test_api_list_sorts_by_update_time_desc(client, test_environment, seed_user, fake_mysql):
+    """验证排序为 update_time DESC, id DESC。"""
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="first", program_name="demo_first",
+        config_name="first.ini",
+    )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="second", program_name="demo_second",
+        config_name="second.ini",
+    )
+
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1", "pageSize": "50"}, headers=headers)
+
+    assert response.status_code == 200
+    records = response.json()["data"]["records"]
+    assert len(records) == 2
+    assert records[0]["programName"] == "demo_second"
+    assert records[1]["programName"] == "demo_first"
+
+
+def test_api_list_pure_database_no_remote_call(client, test_environment, seed_user, fake_mysql, monkeypatch):
+    """验证列表接口纯数据库查询，不触发任何远端命令。"""
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="svc", program_name="demo_svc",
+        config_name="svc.ini",
+    )
+    from app.services.supervisor_manager import SupervisorManager
+    original_list = SupervisorManager.list_services_page
+    called_remote = False
+
+    def assert_no_remote(*args, **kwargs):
+        nonlocal called_remote
+        called_remote = True
+        return {"records": [], "page": 1, "pageSize": 10, "total": 0, "pages": 0}
+
+    monkeypatch.setattr(SupervisorManager, "list_services_page", assert_no_remote)
+
+    # 即使 mock 让列表返回空，也不应抛出异常
+    response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
+    assert response.status_code == 200
+
+
+def test_api_status_refresh_updates_database(client, test_environment, seed_user, fake_mysql, fake_supervisor):
+    """验证刷新状态接口正确解析 supervisorctl 输出并落库。"""
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="svc", program_name="demo_svc",
+        config_name="svc.ini", status="STOPPED",
+    )
+    (conf_dir / "svc.ini").write_text(
+        test_environment["build_ini"]("demo_svc", 9001), encoding="utf-8",
+    )
+    fake_supervisor.states["demo_svc"] = "RUNNING"
+
+    response = client.post("/admin/api/supervisor/services/status/refresh", params={"host": "127.0.0.1"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["host"] == "127.0.0.1"
+    assert data["total"] >= 1
+    assert data["updated"] >= 1
+    assert data["missing"] == 0
+    # 验证数据库已更新
+    record = fake_mysql.tables["sys_supervisor_service"][0]
+    assert record["status"] == "RUNNING"
+
+
+def test_api_status_refresh_reports_missing(client, test_environment, seed_user, fake_mysql, fake_supervisor):
+    """验证刷新接口中远端存在但数据库不存在的 programName 计入 missing。"""
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    (conf_dir / "orphan.ini").write_text(
+        test_environment["build_ini"]("orphan_service", 9999), encoding="utf-8",
+    )
+    fake_supervisor.states["orphan_service"] = "RUNNING"
+
+    response = client.post("/admin/api/supervisor/services/status/refresh", params={"host": "127.0.0.1"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["missing"] >= 1
+
+
+def test_api_status_refresh_caplus_chinese_log(client, test_environment, seed_user, fake_mysql, caplog):
+    """验证状态刷新输出中文日志。"""
+    import logging
+    caplog.set_level(logging.INFO)
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1", job_name="demo", module_name="svc", program_name="demo_svc",
+        config_name="svc.ini",
+    )
+
+    response = client.post("/admin/api/supervisor/services/status/refresh", params={"host": "127.0.0.1"}, headers=headers)
+
+    assert response.status_code == 200
+    assert any("刷新服务状态" in record.message for record in caplog.records)

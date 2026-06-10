@@ -72,3 +72,111 @@ class SupervisorImportRequest(BaseModel):
             return ensure_safe_host(value)
         except ParamError as exc:
             raise ValueError(exc.msg) from exc
+
+
+class ServiceListQuery(BaseModel):
+    """服务列表分页查询参数。"""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    host: str | None = Field(default=None, description="目标主机 IP")
+    keyword: str | None = Field(default=None, description="模糊搜索关键字")
+    status: str | None = Field(default=None, description="按状态过滤")
+    page: int = Field(default=1, ge=1, description="当前页码")
+    page_size: int = Field(default=10, alias="pageSize", description="每页条数，只允许 10/20/50")
+
+    @field_validator("page_size")
+    @classmethod
+    def validate_page_size(cls, value: int) -> int:
+        if value not in {10, 20, 50}:
+            raise ValueError("pageSize 只允许 10、20 或 50")
+        return value
+
+    @field_validator("host")
+    @classmethod
+    def validate_optional_host(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return ensure_safe_host(value)
+        except ParamError as exc:
+            raise ValueError(exc.msg) from exc
+
+
+class ServiceListRecord(BaseModel):
+    """服务列表单条记录视图（纯数据库快照，不含实时远端数据）。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int
+    host: str = Field(alias="hostIp")
+    job_name: str | None = Field(default=None, alias="jobName")
+    module_name: str | None = Field(default=None, alias="moduleName")
+    program_name: str = Field(alias="programName")
+    config_name: str = Field(alias="configName")
+    config_path: str = Field(alias="configPath")
+    file_name: str = Field(alias="fileName")
+    manage_mode: str = Field(alias="manageMode")
+    metadata_complete: bool = Field(alias="metadataComplete")
+    parse_warnings: list[str] = Field(default=[], alias="parseWarnings")
+    java_path: str | None = Field(default=None, alias="javaPath")
+    active: str | None = Field(default=None)
+    port: int | None = Field(default=None)
+    jar_name: str | None = Field(default=None, alias="jarName")
+    xms: str | None = Field(default=None)
+    xmx: str | None = Field(default=None)
+    user: str | None = Field(default=None)
+    status: str = Field(default="UNKNOWN")
+    pid: str | None = Field(default=None)
+    uptime: str | None = Field(default=None)
+    update_time: str | None = Field(default=None, alias="updateTime")
+
+    @classmethod
+    def from_record(cls, record) -> "ServiceListRecord":
+        return cls(
+            id=record.id,
+            hostIp=record.host_ip,
+            jobName=record.job_name,
+            moduleName=record.module_name,
+            programName=record.program_name,
+            configName=record.config_name,
+            configPath=record.config_path,
+            fileName=record.file_name,
+            manageMode=record.manage_mode,
+            metadataComplete=record.metadata_complete,
+            parseWarnings=list(record.parse_warnings),
+            javaPath=record.java_path,
+            active=record.active_profile,
+            port=record.port,
+            jarName=record.jar_name,
+            xms=record.xms,
+            xmx=record.xmx,
+            user=record.run_user,
+            status=record.status,
+            pid=record.pid,
+            uptime=record.uptime,
+            updateTime=record.update_time.strftime("%Y-%m-%d %H:%M:%S") if record.update_time else None,
+        )
+
+
+class PagedServiceResponse(BaseModel):
+    """服务列表分页响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    records: list[ServiceListRecord]
+    page: int
+    page_size: int = Field(alias="pageSize")
+    total: int
+    pages: int
+
+
+class StatusRefreshResponse(BaseModel):
+    """状态刷新响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    total: int
+    updated: int
+    missing: int

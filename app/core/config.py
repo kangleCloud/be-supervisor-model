@@ -33,7 +33,7 @@ DEFAULT_HOSTS: list[dict[str, Any]] = [
     {"name": "local", "ip": "127.0.0.1", "enabled": True, "executorType": "local"},
     {"name": "web-99", "ip": "10.1.0.99", "enabled": True, "executorType": "ansible"},
     {"name": "web-104", "ip": "10.1.0.104", "enabled": True, "executorType": "ansible"},
-    {"name": "web-252", "ip": "101.1.0.252", "enabled": True, "executorType": "ansible"},
+    {"name": "web-252", "ip": "10.1.0.252", "enabled": True, "executorType": "ansible"},
 ]
 
 

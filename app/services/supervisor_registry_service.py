@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import PurePosixPath
 
 from app.core.config import Settings
@@ -14,6 +16,12 @@ from app.core.security import ensure_safe_host, ensure_safe_program_name, ensure
 MANAGE_MODE_TEMPLATE_MANAGED = "TEMPLATE_MANAGED"
 MANAGE_MODE_IMPORTED_READONLY = "IMPORTED_READONLY"
 ALLOWED_MANAGE_MODES = {MANAGE_MODE_TEMPLATE_MANAGED, MANAGE_MODE_IMPORTED_READONLY}
+
+VALID_STATUS_VALUES = frozenset({
+    "RUNNING", "STOPPED", "FATAL", "BACKOFF", "STARTING", "STOPPING", "EXITED", "UNKNOWN",
+})
+
+ALLOWED_PAGE_SIZES = frozenset({10, 20, 50})
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,11 @@ class SupervisorRegistryRecord:
     xms: str | None
     xmx: str | None
     run_user: str | None
+    status: str
+    pid: str | None
+    uptime: str | None
+    status_sync_time: datetime | None
+    update_time: datetime | None
 
 
 class SupervisorRegistryService:
@@ -141,6 +154,109 @@ class SupervisorRegistryService:
                 )
                 row = cursor.fetchone()
         return self._build_record(row) if row is not None else None
+
+    def search_page(
+        self,
+        *,
+        host: str | None = None,
+        keyword: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 10,
+    ) -> tuple[list[SupervisorRegistryRecord], int, int]:
+        """分页查询服务列表，返回 (records, total, pages)。"""
+        safe_keyword = keyword.strip() if keyword else None
+        safe_status = status.strip().upper() if status else None
+        if safe_status is not None and safe_status not in VALID_STATUS_VALUES:
+            raise ParamError(f"status 只支持 {', '.join(sorted(VALID_STATUS_VALUES))}")
+
+        where_clauses: list[str] = []
+        params: list[object] = []
+
+        if host:
+            safe_host = ensure_safe_host(host)
+            where_clauses.append("host_ip = %s")
+            params.append(safe_host)
+
+        if safe_keyword:
+            keyword_pattern = f"%{safe_keyword}%"
+            where_clauses.append(
+                "(program_name LIKE %s OR config_name LIKE %s "
+                "OR job_name LIKE %s OR module_name LIKE %s "
+                "OR CAST(port AS CHAR) LIKE %s)"
+            )
+            params.extend([keyword_pattern] * 5)
+
+        if safe_status:
+            where_clauses.append("status = %s")
+            params.append(safe_status)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = f"WHERE {' AND '.join(where_clauses)}"
+
+        offset = (page - 1) * page_size
+
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"SELECT COUNT(*) AS cnt FROM sys_supervisor_service {where_sql}",
+                    tuple(params),
+                )
+                total = int(cursor.fetchone()["cnt"])
+
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT id, host_ip, config_path, file_name, content_program_name, manage_mode,
+                           baseline_content, metadata_complete, parse_warnings,
+                           job_name, module_name, program_name, config_name,
+                           java_path, active_profile, port, jar_name, xms, xmx, run_user,
+                           status, pid, uptime, status_sync_time, update_time
+                    FROM sys_supervisor_service
+                    {where_sql}
+                    ORDER BY update_time DESC, id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    tuple(params) + (page_size, offset),
+                )
+                rows = cursor.fetchall()
+
+        pages = 0 if total == 0 else math.ceil(total / page_size)
+        return [self._build_record(row) for row in rows], total, pages
+
+    def batch_update_status(
+        self,
+        host: str,
+        status_entries: list[tuple[str, str, str | None, str | None]],
+    ) -> tuple[int, int]:
+        """批量刷新主数据状态快照，返回 (updated_count, missing_count)。"""
+        safe_host = ensure_safe_host(host)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        updated = 0
+        missing_names: set[str] = set()
+
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                for program_name, state, pid, uptime in status_entries:
+                    cursor.execute(
+                        """
+                        UPDATE sys_supervisor_service
+                        SET status = %s,
+                            pid = %s,
+                            uptime = %s,
+                            status_sync_time = %s
+                        WHERE host_ip = %s AND program_name = %s
+                        """,
+                        (state, pid, uptime, now_str, safe_host, program_name),
+                    )
+                    if cursor.rowcount > 0:
+                        updated += 1
+                    else:
+                        missing_names.add(program_name)
+            connection.commit()
+
+        return updated, len(missing_names)
 
     def ensure_can_create(self, data: SupervisorRegistryCreateData) -> None:
         """校验同主机下 programName、configPath、port 不冲突。"""
@@ -403,6 +519,11 @@ class SupervisorRegistryService:
             xms=data.xms,
             xmx=data.xmx,
             run_user=data.run_user,
+            status="UNKNOWN",
+            pid=None,
+            uptime=None,
+            status_sync_time=None,
+            update_time=None,
         )
 
     def _build_record(self, row: dict[str, object]) -> SupervisorRegistryRecord:
@@ -427,6 +548,11 @@ class SupervisorRegistryService:
             xms=self._to_optional_str(row["xms"]),
             xmx=self._to_optional_str(row["xmx"]),
             run_user=self._to_optional_str(row["run_user"]),
+            status=str(row.get("status", "UNKNOWN")),
+            pid=self._to_optional_str(row.get("pid")),
+            uptime=self._to_optional_str(row.get("uptime")),
+            status_sync_time=row.get("status_sync_time"),
+            update_time=row.get("update_time"),
         )
 
     @staticmethod

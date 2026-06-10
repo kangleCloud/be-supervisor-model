@@ -3,8 +3,15 @@ from __future__ import annotations
 
 import logging
 
-from app.core.exceptions import AppError, InternalError
-from app.schemas.supervisor import ServiceCreateRequest, SupervisorImportRequest
+from app.core.exceptions import AppError, InternalError, ParamError
+from app.schemas.supervisor import (
+    PagedServiceResponse,
+    ServiceCreateRequest,
+    ServiceListQuery,
+    ServiceListRecord,
+    StatusRefreshResponse,
+    SupervisorImportRequest,
+)
 from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
@@ -52,22 +59,27 @@ class SupervisorManager:
         """返回允许的主机列表。"""
         return self.host_service.list_hosts()
 
-    def list_services(self, host: str) -> list[dict[str, object]]:
-        """列出数据库中的纳管服务，并实时补充文件状态与运行状态。"""
-        self.host_service.get_host(host)
-        status_map = {item.program_name: item.to_dict() for item in self.supervisor_service.status(host)}
-        result: list[dict[str, object]] = []
-        for record in self.registry_service.list_by_host(host):
-            expected_content = self._render_expected_content(record)
-            file_state = self._detect_file_state(host, record, expected_content)
-            result.append(
-                self._build_service_payload(
-                    record,
-                    status=status_map.get(record.program_name),
-                    file_state=file_state,
-                )
-            )
-        return result
+    def list_services_page(self, query: ServiceListQuery) -> dict[str, object]:
+        """纯数据库分页查询服务列表，不触发任何远端命令。"""
+        LOGGER.info(
+            "查询服务列表：目标主机=%s，关键字=%s，状态=%s，当前页=%s，每页条数=%s",
+            query.host, query.keyword, query.status, query.page, query.page_size,
+        )
+        records, total, pages = self.registry_service.search_page(
+            host=query.host,
+            keyword=query.keyword,
+            status=query.status,
+            page=query.page,
+            page_size=query.page_size,
+        )
+        result = PagedServiceResponse(
+            records=[ServiceListRecord.from_record(r) for r in records],
+            page=query.page,
+            pageSize=query.page_size,
+            total=total,
+            pages=pages,
+        )
+        return result.model_dump(by_alias=True)
 
     def get_service_detail(self, host: str, program_name: str) -> dict[str, object]:
         """返回纳管服务详情、期望配置与远端漂移信息。"""
@@ -129,12 +141,29 @@ class SupervisorManager:
             rollback_result = self._rollback_remote_create(payload.host, rendered.config_name, rendered.program_name)
             if isinstance(exc, AppError):
                 raise
-            LOGGER.exception("create supervisor registry failed", exc_info=exc)
+            LOGGER.exception("新增服务写库失败：目标主机=%s，configName=%s", payload.host, rendered.config_name, exc_info=exc)
             raise InternalError("新增服务写库失败", rollback_result) from exc
 
-        status_entries = self.supervisor_service.status(payload.host, record.program_name)
-        status = status_entries[0].to_dict() if status_entries else None
-        return self._build_service_payload(record, status=status, file_state=FILE_STATE_MATCH)
+        # 新增后不再实时查远端状态；数据库 record 已默认 status='UNKNOWN'
+        return self._build_service_payload(record, status=None, file_state=FILE_STATE_MATCH)
+
+    def refresh_status(self, host: str) -> dict[str, object]:
+        """对指定主机执行一次 supervisorctl status 并批量刷新数据库状态快照。"""
+        LOGGER.info("刷新服务状态：目标主机=%s", host)
+        host_config = self.host_service.get_host(host)
+        status_entries = self.supervisor_service.status(host)
+        status_tuples = [
+            (entry.program_name, entry.state, entry.pid, entry.uptime)
+            for entry in status_entries
+        ]
+        updated, missing = self.registry_service.batch_update_status(host, status_tuples)
+        LOGGER.info("刷新服务状态成功：目标主机=%s，更新条数=%s，未匹配条数=%s", host, updated, missing)
+        return StatusRefreshResponse(
+            host=host_config.ip,
+            total=len(status_entries),
+            updated=updated,
+            missing=missing,
+        ).model_dump(by_alias=True)
 
     def import_services(
         self,

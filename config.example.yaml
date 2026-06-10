@@ -39,6 +39,6 @@ hosts:
     enabled: true
     executorType: ansible
   - name: web-252
-    ip: 101.1.0.252
+    ip: 10.1.0.252
     enabled: true
     executorType: ansible

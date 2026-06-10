@@ -6,7 +6,13 @@ from fastapi import APIRouter, Depends, Query
 from app.core.config import get_settings
 from app.core.response import ok
 from app.core.security import verify_jwt_dependency
-from app.schemas.supervisor import ServiceCreateRequest, SupervisorImportRequest
+from app.schemas.supervisor import (
+    PagedServiceResponse,
+    ServiceCreateRequest,
+    ServiceListQuery,
+    StatusRefreshResponse,
+    SupervisorImportRequest,
+)
 from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
@@ -58,12 +64,16 @@ def list_hosts(manager: SupervisorManager = Depends(get_manager)):
 
 @router.get(
     "/services",
-    summary="查询 Supervisor 服务列表",
-    description="按主机查询数据库中的纳管服务，并实时补充 supervisorctl 状态与远端文件漂移状态；兼容返回 configName/programName，同时显式返回 configPath/fileName/contentProgramName。",
-    response_description="服务列表。",
+    summary="分页查询 Supervisor 服务列表",
+    description="纯数据库分页查询纳管服务列表，按 update_time DESC, id DESC 排序；支持 host/keyword/status 过滤。不触发任何远端命令。",
+    response_description="分页服务列表。",
 )
-def list_services(host: str = Query(..., description="目标主机 IP"), manager: SupervisorManager = Depends(get_manager)):
-    return ok(manager.list_services(host), msg="查询服务列表成功")
+def list_services(
+    query: ServiceListQuery = Depends(),
+    manager: SupervisorManager = Depends(get_manager),
+):
+    result = manager.list_services_page(query)
+    return ok(result, msg="查询服务列表成功")
 
 
 @router.get(
@@ -106,3 +116,17 @@ def create_service(
     current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
 ):
     return ok(manager.create_service(payload, current_user), msg="新增服务成功")
+
+
+@router.post(
+    "/services/status/refresh",
+    summary="刷新服务状态快照",
+    description="对指定主机执行一次 supervisorctl status，批量刷新数据库中的 status/pid/uptime/status_sync_time 快照。",
+    response_description="刷新汇总。",
+)
+def refresh_service_status(
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.refresh_status(host), msg="刷新服务状态成功")

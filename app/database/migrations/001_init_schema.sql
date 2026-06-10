@@ -98,6 +98,10 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     `xms` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xms 参数',
     `xmx` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xmx 参数',
     `run_user` VARCHAR(64) DEFAULT NULL COMMENT 'Supervisor运行用户',
+    `status` VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN' COMMENT '运行状态快照：RUNNING/STOPPED/FATAL/BACKOFF/STARTING/STOPPING/EXITED/UNKNOWN',
+    `pid` VARCHAR(32) DEFAULT NULL COMMENT '进程PID',
+    `uptime` VARCHAR(64) DEFAULT NULL COMMENT '运行时长',
+    `status_sync_time` DATETIME DEFAULT NULL COMMENT '最近状态同步时间',
     `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新增时间',
     `update_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     `create_by_id` BIGINT DEFAULT NULL COMMENT '新增人ID',
@@ -107,7 +111,8 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
     UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`),
     KEY `idx_supervisor_host_program` (`host_ip`, `program_name`),
-    KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`)
+    KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`),
+    KEY `idx_supervisor_host_status` (`host_ip`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Supervisor服务主数据表';
 
 INSERT INTO `sys_user`(

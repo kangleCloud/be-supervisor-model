@@ -15,7 +15,7 @@ def test_database_initialization_is_idempotent(settings, fake_mysql):
     assert "sys_login_log" in fake_mysql.tables
     assert "sys_login_token" in fake_mysql.tables
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2]
 
 
 def test_database_bootstraps_single_super_admin(settings, fake_mysql):
@@ -38,7 +38,7 @@ def test_database_recreates_missing_auth_tables(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_login_token" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2]
 
 
 def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
@@ -50,7 +50,7 @@ def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert [row["version"] for row in fake_mysql.tables["sys_schema_migration"]] == [1]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2]
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):

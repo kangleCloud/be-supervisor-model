@@ -5,6 +5,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from pydantic_core import ValidationError as PydanticCoreValidationError
 from starlette.responses import Response
 
 from app.api.auth import router as auth_router
@@ -71,6 +72,11 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_: Request, exc: RequestValidationError):
         LOGGER.debug("request validation failed: %s", exc)
+        return fail(400, 40000, "请求参数非法")
+
+    @app.exception_handler(PydanticCoreValidationError)
+    async def handle_pydantic_core_validation_error(_: Request, exc: PydanticCoreValidationError):
+        LOGGER.debug("pydantic-core validation failed: %s", exc)
         return fail(400, 40000, "请求参数非法")
 
     @app.exception_handler(Exception)

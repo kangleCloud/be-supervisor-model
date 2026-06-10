@@ -1,6 +1,7 @@
 """Supervisor 命令封装。"""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,12 +10,22 @@ from app.core.security import ensure_safe_program_name
 from app.services.host_service import HostService
 
 
+PID_UPTIME_PATTERN = re.compile(r"pid\s+(?P<pid>\d+),\s+uptime\s+(?P<uptime>\S+)")
+
+
+ALLOWED_STATUS_VALUES = frozenset({
+    "RUNNING", "STOPPED", "FATAL", "BACKOFF", "STARTING", "STOPPING", "EXITED", "UNKNOWN",
+})
+
+
 @dataclass(frozen=True)
 class SupervisorStatus:
     """Supervisor 状态条目。"""
 
     program_name: str
     state: str
+    pid: Optional[str]
+    uptime: Optional[str]
     raw: str
 
     def to_dict(self) -> dict[str, str]:
@@ -101,10 +112,20 @@ class SupervisorService:
                 continue
             parts = stripped.split(maxsplit=2)
             if len(parts) >= 2:
+                state = parts[1]
+                detail = parts[2] if len(parts) >= 3 else ""
+                pid: str | None = None
+                uptime: str | None = None
+                pid_match = PID_UPTIME_PATTERN.search(detail)
+                if pid_match is not None:
+                    pid = pid_match.group("pid")
+                    uptime = pid_match.group("uptime")
                 statuses.append(
                     SupervisorStatus(
                         program_name=parts[0],
-                        state=parts[1],
+                        state=state,
+                        pid=pid,
+                        uptime=uptime,
                         raw=stripped,
                     )
                 )
