@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.exceptions import ParamError
 from app.core.security import ensure_safe_host, ensure_safe_name, ensure_valid_port
@@ -29,7 +29,7 @@ class _ServiceMutationRequestFields(BaseModel):
     active: str = Field(..., description="Spring profile 环境")
     port: int = Field(..., description="服务监听端口")
     jar_name: str = Field(default="", alias="jarName", description="Jar 包文件名，默认使用 moduleName.jar")
-    config_name: str = Field(default="", alias="configName", description="配置文件名，可为空")
+    file_name: str = Field(default="", alias="fileName", description="配置文件名，可为空")
     xms: str = Field(default="128m", description="JVM Xms 参数")
     xmx: str = Field(default="128m", description="JVM Xmx 参数")
     user: str = Field(default="root", description="Supervisor 运行用户")
@@ -84,12 +84,13 @@ class ServiceUpdateRequest(_ServiceMutationRequestFields):
 
 
 class SupervisorImportRequest(BaseModel):
-    """初始化导入请求。"""
+    """初始化导入请求（两阶段：PRECHECK 写暂存表，COMMIT 原子提交）。"""
 
     model_config = ConfigDict(extra="forbid")
 
     host: str = Field(..., description="目标主机 IP")
-    mode: Literal["DRY_RUN", "APPLY"] = Field(..., description="导入模式：DRY_RUN 仅预检，APPLY 正式导入")
+    mode: Literal["PRECHECK", "COMMIT"] = Field(..., description="导入模式：PRECHECK 预检写入暂存表，COMMIT 原子提交")
+    batch_id: str | None = Field(default=None, alias="batchId", description="COMMIT 模式时必传的批次标识")
 
     @field_validator("host")
     @classmethod
@@ -98,6 +99,14 @@ class SupervisorImportRequest(BaseModel):
             return ensure_safe_host(value)
         except ParamError as exc:
             raise ValueError(exc.msg) from exc
+
+    @model_validator(mode="after")
+    def validate_batch_id_rules(self) -> "SupervisorImportRequest":
+        if self.mode == "PRECHECK" and self.batch_id:
+            raise ValueError("PRECHECK 模式不能传 batchId")
+        if self.mode == "COMMIT" and not (self.batch_id or "").strip():
+            raise ValueError("COMMIT 模式必须传 batchId")
+        return self
 
 
 class ServiceListQuery(BaseModel):
@@ -139,7 +148,7 @@ class ServiceListQuery(BaseModel):
 
 
 class ServiceListRecord(BaseModel):
-    """服务列表单条记录视图（纯数据库快照，不含实时远端数据）。"""
+    """服务列表单条记录视图。"""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -147,8 +156,7 @@ class ServiceListRecord(BaseModel):
     host: str = Field(alias="hostIp")
     job_name: str | None = Field(default=None, alias="jobName")
     module_name: str | None = Field(default=None, alias="moduleName")
-    program_name: str = Field(alias="programName")
-    config_name: str = Field(alias="configName")
+    content_program_name: str = Field(alias="contentProgramName")
     config_path: str = Field(alias="configPath")
     file_name: str = Field(alias="fileName")
     manage_mode: str = Field(alias="manageMode")
@@ -176,8 +184,7 @@ class ServiceListRecord(BaseModel):
             hostIp=record.host_ip,
             jobName=record.job_name,
             moduleName=record.module_name,
-            programName=record.program_name,
-            configName=record.config_name,
+            contentProgramName=record.content_program_name,
             configPath=record.config_path,
             fileName=record.file_name,
             manageMode=record.manage_mode,
@@ -231,9 +238,9 @@ class ServiceDetailResponse(BaseModel):
     id: int
     host: str
     host_name: str = Field(alias="hostName")
-    program_name: str = Field(alias="programName")
-    config_name: str = Field(alias="configName")
+    content_program_name: str = Field(alias="contentProgramName")
     config_path: str = Field(alias="configPath")
+    file_name: str = Field(alias="fileName")
     job_name: str | None = Field(default=None, alias="jobName")
     module_name: str | None = Field(default=None, alias="moduleName")
     java_path: str | None = Field(default=None, alias="javaPath")
@@ -266,9 +273,9 @@ class ServiceDetailResponse(BaseModel):
             id=record.id,
             host=record.host_ip,
             hostName=host_name,
-            programName=record.program_name,
-            configName=record.config_name,
+            contentProgramName=record.content_program_name,
             configPath=record.config_path,
+            fileName=record.file_name,
             jobName=record.job_name,
             moduleName=record.module_name,
             javaPath=record.java_path,
@@ -303,7 +310,7 @@ class ServiceSyncResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     host: str
-    program_name: str = Field(alias="programName")
+    content_program_name: str = Field(alias="contentProgramName")
     status: str
     pid: str | None = Field(default=None)
     uptime: str | None = Field(default=None)
@@ -321,10 +328,10 @@ class ServiceUpdateResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     host: str
-    previous_program_name: str = Field(alias="previousProgramName")
-    program_name: str = Field(alias="programName")
-    config_name: str = Field(alias="configName")
+    previous_content_program_name: str = Field(alias="previousContentProgramName")
+    content_program_name: str = Field(alias="contentProgramName")
     config_path: str = Field(alias="configPath")
+    file_name: str = Field(alias="fileName")
     manage_mode: str = Field(alias="manageMode")
     command_results: dict[str, object] = Field(alias="commandResults")
 
@@ -335,7 +342,7 @@ class ServiceDeleteResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     host: str
-    program_name: str = Field(alias="programName")
+    content_program_name: str = Field(alias="contentProgramName")
     deleted_config_path: str = Field(alias="deletedConfigPath")
     backup_path: str | None = Field(default=None, alias="backupPath")
     command_results: dict[str, object] = Field(alias="commandResults")
@@ -347,7 +354,7 @@ class RuntimeActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     host: str
-    program_name: str = Field(alias="programName")
+    content_program_name: str = Field(alias="contentProgramName")
     action: str
     status: str
     command_result: dict[str, object] = Field(alias="commandResult")
@@ -359,7 +366,7 @@ class ArchiveActionResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     host: str
-    program_name: str = Field(alias="programName")
+    content_program_name: str = Field(alias="contentProgramName")
     is_archived: bool = Field(alias="isArchived")
     archived_at: str | None = Field(default=None, alias="archivedAt")
     restored_at: str | None = Field(default=None, alias="restoredAt")

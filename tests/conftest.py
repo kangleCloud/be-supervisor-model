@@ -91,7 +91,7 @@ class FakeSupervisorCtl:
             if len(args) == 2:
                 lines = []
                 for name in current_programs:
-                    state = self.states.get(name, "STOPPED")
+                    state = self.states.get(name, "RUNNING")
                     detail = "pid 1, uptime 0:00:10" if state == "RUNNING" else "Not started"
                     lines.append(f"{name} {state} {detail}")
                 return SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
@@ -99,7 +99,7 @@ class FakeSupervisorCtl:
             name = args[2]
             if name not in current_programs:
                 return SimpleNamespace(returncode=3, stdout="", stderr="ERROR (no such process)")
-            state = self.states.get(name, "STOPPED")
+            state = self.states.get(name, "RUNNING")
             detail = "pid 1, uptime 0:00:10" if state == "RUNNING" else "Not started"
             return SimpleNamespace(returncode=0, stdout=f"{name} {state} {detail}", stderr="")
 
@@ -197,6 +197,7 @@ class FakeMySQLServer:
             "sys_login_log": 1,
             "sys_login_token": 1,
             "sys_supervisor_service": 1,
+            "sys_supervisor_import_staging": 1,
         }
         self.fail_next_supervisor_insert = False
         self.fail_next_supervisor_update = False
@@ -236,8 +237,6 @@ class FakeMySQLServer:
                 "parse_warnings",
                 "job_name",
                 "module_name",
-                "program_name",
-                "config_name",
                 "java_path",
                 "active_profile",
                 "port",
@@ -269,6 +268,32 @@ class FakeMySQLServer:
                 "update_by",
                 "remark",
             }
+        if table_name == "sys_supervisor_import_staging":
+            return {
+                "id",
+                "batch_id",
+                "host_ip",
+                "operator_id",
+                "operator_name",
+                "config_path",
+                "file_name",
+                "content_program_name",
+                "baseline_content",
+                "metadata_complete",
+                "parse_warnings",
+                "job_name",
+                "module_name",
+                "java_path",
+                "active_profile",
+                "port",
+                "jar_name",
+                "xms",
+                "xmx",
+                "run_user",
+                "result",
+                "message",
+                "create_time",
+            }
         return set()
 
     @staticmethod
@@ -280,6 +305,11 @@ class FakeMySQLServer:
                 "idx_supervisor_host_manage_mode",
                 "idx_supervisor_host_archived",
                 "idx_supervisor_host_status",
+            }
+        if table_name == "sys_supervisor_import_staging":
+            return {
+                "idx_staging_batch_id",
+                "idx_staging_host_ip",
             }
         return set()
 
@@ -294,7 +324,6 @@ class FakeMySQLServer:
         is_super_admin: int = 0,
     ) -> None:
         if user_id is None:
-            # 默认超级管理员会在迁移时占用首个 ID，测试辅助按当前表数据自动顺延。
             user_id = max((int(item["id"]) for item in self.tables.get("sys_user", [])), default=0) + 1
         self.tables.setdefault("sys_user", [])
         self.tables["sys_user"].append(
@@ -545,12 +574,12 @@ class FakeMySQLServer:
                 filtered_rows = [row for row in filtered_rows if str(row.get("host_ip", "")) == host_val]
                 param_idx += 1
                 continue
-            if clause.startswith("(program_name LIKE %s"):
+            if clause.startswith("(content_program_name LIKE %s"):
                 keyword_val = str(params[param_idx]).replace("%", "").lower()
                 filtered_rows = [
                     row for row in filtered_rows
-                    if keyword_val in str(row.get("program_name", "")).lower()
-                    or keyword_val in str(row.get("config_name", "")).lower()
+                    if keyword_val in str(row.get("content_program_name", "")).lower()
+                    or keyword_val in str(row.get("file_name", "")).lower()
                     or keyword_val in str(row.get("job_name", "") or "").lower()
                     or keyword_val in str(row.get("module_name", "") or "").lower()
                     or keyword_val in str(row.get("port", "") or "")
@@ -567,11 +596,15 @@ class FakeMySQLServer:
                 filtered_rows = [row for row in filtered_rows if int(row.get("is_archived", 0)) == archived_val]
                 param_idx += 1
                 continue
+            if clause.startswith("is_archived = "):
+                # Handle literal values like is_archived = 0 or is_archived = 1
+                archived_val = int(clause.split("=")[1].strip())
+                filtered_rows = [row for row in filtered_rows if int(row.get("is_archived", 0)) == archived_val]
+                continue
         return filtered_rows
 
     @staticmethod
     def _matches_insert(normalized: str, table_name: str) -> bool:
-        """兼容是否带反引号的 INSERT INTO table(...) 写法。"""
         return normalized.startswith(f"INSERT INTO {table_name}(") or normalized.startswith(
             f"INSERT INTO `{table_name}`("
         )
@@ -660,6 +693,109 @@ class FakeMySQLServer:
             self.tables.setdefault("sys_schema_migration", []).append({"version": int(version), "name": str(name)})
             return 1
 
+        if self._matches_insert(normalized, "sys_supervisor_import_staging"):
+            staging_id = self.auto_increment["sys_supervisor_import_staging"]
+            self.auto_increment["sys_supervisor_import_staging"] += 1
+            self.tables.setdefault("sys_supervisor_import_staging", []).append(
+                {
+                    "id": staging_id,
+                    "batch_id": str(params[0]),
+                    "host_ip": str(params[1]),
+                    "operator_id": int(params[2]),
+                    "operator_name": str(params[3]),
+                    "config_path": str(params[4]),
+                    "file_name": str(params[5]),
+                    "content_program_name": str(params[6]) if params[6] is not None else None,
+                    "baseline_content": str(params[7]) if params[7] is not None else None,
+                    "metadata_complete": int(params[8]),
+                    "parse_warnings": str(params[9]) if params[9] is not None else None,
+                    "job_name": str(params[10]) if params[10] is not None else None,
+                    "module_name": str(params[11]) if params[11] is not None else None,
+                    "java_path": str(params[12]) if params[12] is not None else None,
+                    "active_profile": str(params[13]) if params[13] is not None else None,
+                    "port": int(params[14]) if params[14] is not None else None,
+                    "jar_name": str(params[15]) if params[15] is not None else None,
+                    "xms": str(params[16]) if params[16] is not None else None,
+                    "xmx": str(params[17]) if params[17] is not None else None,
+                    "run_user": str(params[18]) if params[18] is not None else None,
+                    "result": str(params[19]),
+                    "message": str(params[20]) if params[20] is not None else None,
+                    "create_time": "2026-06-11 00:00:00",
+                }
+            )
+            cursor.lastrowid = staging_id
+            return 1
+
+        if normalized.startswith(
+            "SELECT id, batch_id, host_ip, operator_id, operator_name, config_path, file_name, content_program_name,"
+        ) and "FROM sys_supervisor_import_staging" in normalized:
+            batch_id = str(params[0])
+            host_ip = str(params[1])
+            operator_id = int(params[2])
+            rows = [
+                dict(item)
+                for item in self.tables.get("sys_supervisor_import_staging", [])
+                if str(item.get("batch_id")) == batch_id
+                and str(item.get("host_ip")) == host_ip
+                and int(item.get("operator_id", 0)) == operator_id
+            ]
+            rows.sort(key=lambda row: int(row["id"]))
+            cursor.results = rows
+            return len(rows)
+
+        if normalized == "DELETE FROM sys_supervisor_import_staging WHERE create_time < %s":
+            expire_before = str(params[0])
+            rows = self.tables.get("sys_supervisor_import_staging", [])
+            before = len(rows)
+            self.tables["sys_supervisor_import_staging"] = [
+                item for item in rows if str(item.get("create_time", "")) >= expire_before
+            ]
+            deleted = before - len(self.tables["sys_supervisor_import_staging"])
+            cursor.rowcount = deleted
+            return deleted
+
+        if normalized == "DELETE FROM sys_supervisor_import_staging WHERE host_ip = %s AND operator_id = %s":
+            host_ip = str(params[0])
+            operator_id = int(params[1])
+            rows = self.tables.get("sys_supervisor_import_staging", [])
+            before = len(rows)
+            self.tables["sys_supervisor_import_staging"] = [
+                item for item in rows
+                if not (str(item.get("host_ip")) == host_ip and int(item.get("operator_id", 0)) == operator_id)
+            ]
+            deleted = before - len(self.tables["sys_supervisor_import_staging"])
+            cursor.rowcount = deleted
+            return deleted
+
+        if normalized == "DELETE FROM sys_supervisor_import_staging WHERE batch_id = %s":
+            batch_id = str(params[0])
+            rows = self.tables.get("sys_supervisor_import_staging", [])
+            before = len(rows)
+            self.tables["sys_supervisor_import_staging"] = [
+                item for item in rows if str(item.get("batch_id")) != batch_id
+            ]
+            deleted = before - len(self.tables["sys_supervisor_import_staging"])
+            cursor.rowcount = deleted
+            return deleted
+
+        if normalized == "DELETE FROM sys_supervisor_import_staging WHERE batch_id = %s AND host_ip = %s AND operator_id = %s":
+            batch_id = str(params[0])
+            host_ip = str(params[1])
+            operator_id = int(params[2])
+            rows = self.tables.get("sys_supervisor_import_staging", [])
+            before = len(rows)
+            self.tables["sys_supervisor_import_staging"] = [
+                item for item in rows
+                if not (
+                    str(item.get("batch_id")) == batch_id
+                    and str(item.get("host_ip")) == host_ip
+                    and int(item.get("operator_id", 0)) == operator_id
+                )
+            ]
+            deleted = before - len(self.tables["sys_supervisor_import_staging"])
+            cursor.rowcount = deleted
+            return deleted
+
         if "FROM sys_user WHERE user_name = %s AND is_deleted = 0 LIMIT 1" in normalized:
             username = str(params[0])
             row = next(
@@ -680,16 +816,11 @@ class FakeMySQLServer:
 
         if self._matches_insert(normalized, "sys_user"):
             active_admin = next(
-                (
-                    item
-                    for item in self.tables.get("sys_user", [])
-                    if item["user_name"] == "admin" and item["is_deleted"] == 0
-                ),
+                (item for item in self.tables.get("sys_user", []) if item["user_name"] == "admin" and item["is_deleted"] == 0),
                 None,
             )
             if active_admin is not None:
                 return 0
-
             next_user_id = max((int(item["id"]) for item in self.tables.get("sys_user", [])), default=0) + 1
             self.tables.setdefault("sys_user", []).append(
                 {
@@ -818,7 +949,6 @@ class FakeMySQLServer:
                 rows = self._filter_supervisor_rows(rows, where_part, params)
             else:
                 rows = [dict(self._hydrate_supervisor_defaults(dict(row))) for row in rows]
-            # 模拟 ORDER BY update_time DESC, id DESC — 对内存数据按 id 降序
             rows.sort(key=lambda r: -int(r.get("id", 0)))
             has_limit = "LIMIT %s OFFSET %s" in normalized
             if has_limit and len(params) >= 2:
@@ -828,14 +958,15 @@ class FakeMySQLServer:
             cursor.results = [dict(item) for item in rows]
             return len(cursor.results)
 
-        if "FROM sys_supervisor_service WHERE host_ip = %s AND program_name = %s LIMIT 1" in normalized:
+        # SELECT with content_program_name (new pattern)
+        if "FROM sys_supervisor_service WHERE host_ip = %s AND content_program_name = %s LIMIT 1" in normalized:
             host_ip = str(params[0])
-            program_name = str(params[1])
+            content_program_name = str(params[1])
             row = next(
                 (
                     dict(self._hydrate_supervisor_defaults(item))
                     for item in self.tables.get("sys_supervisor_service", [])
-                    if item["host_ip"] == host_ip and item["program_name"] == program_name
+                    if item["host_ip"] == host_ip and item.get("content_program_name", item.get("program_name")) == content_program_name
                 ),
                 None,
             )
@@ -861,17 +992,20 @@ class FakeMySQLServer:
                 self.fail_next_supervisor_insert = False
                 raise RuntimeError("模拟 Supervisor 主数据写库失败")
 
+            # New INSERT pattern: host_ip, job_name, module_name, content_program_name,
+            # config_path, file_name, manage_mode, baseline_content, metadata_complete, parse_warnings,
+            # java_path, active_profile, port, jar_name, xms, xmx, run_user,
+            # create_by_id, create_by, update_by_id, update_by, remark
             host_ip = str(params[0])
-            program_name = str(params[3])
-            config_name = str(params[4])
-            config_path = str(params[5])
-            port = int(params[14]) if params[14] is not None else None
+            content_program_name = str(params[3])
+            config_path = str(params[4])
+            port = int(params[12]) if len(params) > 12 and params[12] is not None else None
             for item in self.tables.get("sys_supervisor_service", []):
                 self._hydrate_supervisor_defaults(item)
                 if item["host_ip"] != host_ip:
                     continue
-                if item["program_name"] == program_name:
-                    raise RuntimeError("duplicate program_name")
+                if item.get("content_program_name", item.get("program_name")) == content_program_name:
+                    raise RuntimeError("duplicate content_program_name")
                 if item["config_path"] == config_path:
                     raise RuntimeError("duplicate config_path")
                 if port is not None and item["port"] is not None and int(item["port"]) == port:
@@ -885,134 +1019,141 @@ class FakeMySQLServer:
                     host_ip=host_ip,
                     job_name=str(params[1]) if params[1] is not None else None,
                     module_name=str(params[2]) if params[2] is not None else None,
-                    program_name=program_name,
-                    config_name=config_name,
+                    program_name=content_program_name,
+                    config_name=str(params[5]),
                     config_path=config_path,
-                    file_name=str(params[6]),
-                    content_program_name=str(params[7]),
-                    manage_mode=str(params[8]),
-                    baseline_content=str(params[9]),
-                    metadata_complete=bool(params[10]),
-                    parse_warnings=str(params[11]),
-                    java_path=str(params[12]) if params[12] is not None else None,
-                    active_profile=str(params[13]) if params[13] is not None else None,
+                    file_name=str(params[5]),
+                    content_program_name=content_program_name,
+                    manage_mode=str(params[6]),
+                    baseline_content=str(params[7]),
+                    metadata_complete=bool(params[8]),
+                    parse_warnings=str(params[9]),
+                    java_path=str(params[10]) if len(params) > 10 and params[10] is not None else None,
+                    active_profile=str(params[11]) if len(params) > 11 and params[11] is not None else None,
                     port=port,
-                    jar_name=str(params[15]) if params[15] is not None else None,
-                    xms=str(params[16]) if params[16] is not None else None,
-                    xmx=str(params[17]) if params[17] is not None else None,
-                    run_user=str(params[18]) if params[18] is not None else None,
-                    create_by_id=int(params[19]),
-                    create_by=str(params[20]),
-                    update_by_id=int(params[21]),
-                    update_by=str(params[22]),
-                    remark=str(params[23]),
+                    jar_name=str(params[13]) if len(params) > 13 and params[13] is not None else None,
+                    xms=str(params[14]) if len(params) > 14 and params[14] is not None else None,
+                    xmx=str(params[15]) if len(params) > 15 and params[15] is not None else None,
+                    run_user=str(params[16]) if len(params) > 16 and params[16] is not None else None,
+                    create_by_id=int(params[17]) if len(params) > 17 else 0,
+                    create_by=str(params[18]) if len(params) > 18 else "system",
+                    update_by_id=int(params[19]) if len(params) > 19 else 0,
+                    update_by=str(params[20]) if len(params) > 20 else "system",
+                    remark=str(params[21]) if len(params) > 21 else "",
                 )
             )
             cursor.lastrowid = record_id
             return 1
 
-        if (
-            normalized.startswith("UPDATE sys_supervisor_service SET job_name = %s, module_name = %s, program_name = %s,")
-            and "status = %s, pid = %s, uptime = %s, status_sync_time = %s" in normalized
-        ):
+        # UPDATE with SET job_name, module_name, content_program_name (new pattern)
+        if "UPDATE sys_supervisor_service SET job_name = %s, module_name = %s, content_program_name = %s" in normalized:
             if self.fail_next_supervisor_update:
                 self.fail_next_supervisor_update = False
                 raise RuntimeError("模拟 Supervisor 主数据更新失败")
-            record_id = int(params[-1])
-            for item in self.tables.get("sys_supervisor_service", []):
-                if int(item["id"]) != record_id:
-                    continue
-                self._hydrate_supervisor_defaults(item)
-                item["job_name"] = str(params[0]) if params[0] is not None else None
-                item["module_name"] = str(params[1]) if params[1] is not None else None
-                item["program_name"] = str(params[2])
-                item["config_name"] = str(params[3])
-                item["config_path"] = str(params[4])
-                item["file_name"] = str(params[5])
-                item["content_program_name"] = str(params[6])
-                item["manage_mode"] = str(params[7])
-                item["baseline_content"] = str(params[8])
-                item["metadata_complete"] = int(params[9])
-                item["parse_warnings"] = str(params[10])
-                item["java_path"] = str(params[11]) if params[11] is not None else None
-                item["active_profile"] = str(params[12]) if params[12] is not None else None
-                item["port"] = int(params[13]) if params[13] is not None else None
-                item["jar_name"] = str(params[14]) if params[14] is not None else None
-                item["xms"] = str(params[15]) if params[15] is not None else None
-                item["xmx"] = str(params[16]) if params[16] is not None else None
-                item["run_user"] = str(params[17]) if params[17] is not None else None
-                item["status"] = str(params[18])
-                item["pid"] = str(params[19]) if params[19] is not None else None
-                item["uptime"] = str(params[20]) if params[20] is not None else None
-                item["status_sync_time"] = str(params[21])
-                item["command"] = str(params[22]) if params[22] is not None else None
-                item["directory"] = str(params[23]) if params[23] is not None else None
-                item["stdout_logfile"] = str(params[24]) if params[24] is not None else None
-                item["has_backup"] = int(params[25])
-                item["config_content"] = str(params[26]) if params[26] is not None else None
-                item["backup_config_content"] = str(params[27]) if params[27] is not None else None
-                item["last_sync_at"] = str(params[28])
-                item["sync_status"] = str(params[29])
-                item["sync_error"] = str(params[30]) if params[30] is not None else None
-                item["update_by_id"] = int(params[31])
-                item["update_by"] = str(params[32])
-                item["remark"] = str(params[33])
-                return 1
-            return 0
 
-        if normalized.startswith("UPDATE sys_supervisor_service SET job_name = %s,"):
-            if self.fail_next_supervisor_update:
-                self.fail_next_supervisor_update = False
-                raise RuntimeError("模拟 Supervisor 主数据更新失败")
-            record_id = int(params[-1])
-            for item in self.tables.get("sys_supervisor_service", []):
-                if int(item["id"]) != record_id:
-                    continue
-                self._hydrate_supervisor_defaults(item)
-                item["job_name"] = str(params[0]) if params[0] is not None else None
-                item["module_name"] = str(params[1]) if params[1] is not None else None
-                item["program_name"] = str(params[2])
-                item["config_name"] = str(params[3])
-                item["config_path"] = str(params[4])
-                item["file_name"] = str(params[5])
-                item["content_program_name"] = str(params[6])
-                item["manage_mode"] = str(params[7])
-                item["baseline_content"] = str(params[8])
-                item["metadata_complete"] = int(params[9])
-                item["parse_warnings"] = str(params[10])
-                item["java_path"] = str(params[11]) if params[11] is not None else None
-                item["active_profile"] = str(params[12]) if params[12] is not None else None
-                item["port"] = int(params[13]) if params[13] is not None else None
-                item["jar_name"] = str(params[14]) if params[14] is not None else None
-                item["xms"] = str(params[15]) if params[15] is not None else None
-                item["xmx"] = str(params[16]) if params[16] is not None else None
-                item["run_user"] = str(params[17]) if params[17] is not None else None
-                item["update_by_id"] = int(params[18])
-                item["update_by"] = str(params[19])
-                item["remark"] = str(params[20])
-                return 1
-            return 0
+            # Full update with runtime snapshot (update_service in mutation)
+            if "status = %s, pid = %s, uptime = %s, status_sync_time = %s" in normalized:
+                record_id = int(params[-1]) if params else 0
+                if "WHERE id = %s" in normalized:
+                    for item in self.tables.get("sys_supervisor_service", []):
+                        if int(item["id"]) != record_id:
+                            continue
+                        self._hydrate_supervisor_defaults(item)
+                        item["job_name"] = str(params[0]) if params[0] is not None else None
+                        item["module_name"] = str(params[1]) if params[1] is not None else None
+                        item["content_program_name"] = str(params[2])
+                        item["config_path"] = str(params[3])
+                        item["file_name"] = str(params[4])
+                        item["manage_mode"] = str(params[5])
+                        item["baseline_content"] = str(params[6])
+                        item["metadata_complete"] = int(params[7])
+                        item["parse_warnings"] = str(params[8])
+                        item["java_path"] = str(params[9]) if params[9] is not None else None
+                        item["active_profile"] = str(params[10]) if params[10] is not None else None
+                        item["port"] = int(params[11]) if params[11] is not None else None
+                        item["jar_name"] = str(params[12]) if params[12] is not None else None
+                        item["xms"] = str(params[13]) if params[13] is not None else None
+                        item["xmx"] = str(params[14]) if params[14] is not None else None
+                        item["run_user"] = str(params[15]) if params[15] is not None else None
+                        item["status"] = str(params[16])
+                        item["pid"] = str(params[17]) if params[17] is not None else None
+                        item["uptime"] = str(params[18]) if params[18] is not None else None
+                        item["status_sync_time"] = str(params[19])
+                        item["command"] = str(params[20]) if params[20] is not None else None
+                        item["directory"] = str(params[21]) if params[21] is not None else None
+                        item["stdout_logfile"] = str(params[22]) if params[22] is not None else None
+                        item["has_backup"] = int(params[23])
+                        item["config_content"] = str(params[24]) if params[24] is not None else None
+                        item["backup_config_content"] = str(params[25]) if params[25] is not None else None
+                        item["last_sync_at"] = str(params[26])
+                        item["sync_status"] = str(params[27])
+                        item["sync_error"] = str(params[28]) if params[28] is not None else None
+                        item["update_by_id"] = int(params[29])
+                        item["update_by"] = str(params[30])
+                        item["remark"] = str(params[31])
+                        return 1
+                return 0
 
-        if normalized == "DELETE FROM sys_supervisor_service WHERE id = %s":
-            if self.fail_next_supervisor_delete:
-                self.fail_next_supervisor_delete = False
-                raise RuntimeError("模拟 Supervisor 主数据删除失败")
-            record_id = int(params[0])
-            rows = self.tables.get("sys_supervisor_service", [])
-            before = len(rows)
-            self.tables["sys_supervisor_service"] = [item for item in rows if int(item["id"]) != record_id]
-            deleted = before - len(self.tables["sys_supervisor_service"])
-            cursor.rowcount = deleted
-            return deleted
+            # WHERE host_ip = %s AND content_program_name = %s (registry update)
+            if "WHERE host_ip = %s AND content_program_name = %s" in normalized:
+                target_host = str(params[-2])
+                target_pn = str(params[-1])
+                for item in self.tables.get("sys_supervisor_service", []):
+                    if item["host_ip"] != target_host or item.get("content_program_name", item.get("program_name")) != target_pn:
+                        continue
+                    self._hydrate_supervisor_defaults(item)
+                    item["job_name"] = str(params[0]) if params[0] is not None else None
+                    item["module_name"] = str(params[1]) if params[1] is not None else None
+                    item["content_program_name"] = str(params[2])
+                    item["config_path"] = str(params[3])
+                    item["file_name"] = str(params[4])
+                    item["manage_mode"] = str(params[5])
+                    item["baseline_content"] = str(params[6])
+                    item["metadata_complete"] = int(params[7])
+                    item["parse_warnings"] = str(params[8])
+                    item["java_path"] = str(params[9]) if params[9] is not None else None
+                    item["active_profile"] = str(params[10]) if params[10] is not None else None
+                    item["port"] = int(params[11]) if params[11] is not None else None
+                    item["jar_name"] = str(params[12]) if params[12] is not None else None
+                    item["xms"] = str(params[13]) if params[13] is not None else None
+                    item["xmx"] = str(params[14]) if params[14] is not None else None
+                    item["run_user"] = str(params[15]) if params[15] is not None else None
+                    item["update_by_id"] = int(params[16])
+                    item["update_by"] = str(params[17])
+                    item["remark"] = str(params[18])
+                    return 1
+                return 0
 
-        if normalized.startswith("SELECT COUNT(*) AS cnt FROM sys_supervisor_service"):
-            rows = list(self.tables.get("sys_supervisor_service", []))
-            if "WHERE" in normalized:
-                where_part = normalized.split("WHERE")[1].strip()
-                rows = self._filter_supervisor_rows(rows, where_part, params)
-            cursor.results = [{"cnt": len(rows)}]
-            return len(rows)
+            # WHERE id = %s (upsert_imported update)
+            if "WHERE id = %s" in normalized:
+                record_id = int(params[-1])
+                for item in self.tables.get("sys_supervisor_service", []):
+                    if int(item["id"]) != record_id:
+                        continue
+                    self._hydrate_supervisor_defaults(item)
+                    item["job_name"] = str(params[0]) if params[0] is not None else None
+                    item["module_name"] = str(params[1]) if params[1] is not None else None
+                    item["content_program_name"] = str(params[2])
+                    item["config_path"] = str(params[3])
+                    item["file_name"] = str(params[4])
+                    item["manage_mode"] = str(params[5])
+                    item["baseline_content"] = str(params[6])
+                    item["metadata_complete"] = int(params[7])
+                    item["parse_warnings"] = str(params[8])
+                    item["java_path"] = str(params[9]) if params[9] is not None else None
+                    item["active_profile"] = str(params[10]) if params[10] is not None else None
+                    item["port"] = int(params[11]) if params[11] is not None else None
+                    item["jar_name"] = str(params[12]) if params[12] is not None else None
+                    item["xms"] = str(params[13]) if params[13] is not None else None
+                    item["xmx"] = str(params[14]) if params[14] is not None else None
+                    item["run_user"] = str(params[15]) if params[15] is not None else None
+                    item["update_by_id"] = int(params[16])
+                    item["update_by"] = str(params[17])
+                    item["remark"] = str(params[18])
+                    return 1
+                return 0
 
+        # Full sync update (supervisor_sync_service) — must check before the simpler status update
         if normalized.startswith(
             "UPDATE sys_supervisor_service SET status = %s, pid = %s, uptime = %s, status_sync_time = %s, command = %s,"
         ):
@@ -1040,12 +1181,12 @@ class FakeMySQLServer:
                 sync_status,
                 sync_error,
                 host_ip,
-                program_name,
+                content_program_name,
             ) = params
             updated = 0
             for item in self.tables.get("sys_supervisor_service", []):
                 self._hydrate_supervisor_defaults(item)
-                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                if item["host_ip"] != host_ip or item.get("content_program_name", item.get("program_name")) != content_program_name:
                     continue
                 item["status"] = str(status)
                 item["pid"] = str(pid) if pid is not None else None
@@ -1073,58 +1214,108 @@ class FakeMySQLServer:
             cursor.rowcount = updated
             return updated
 
-        if normalized.startswith("UPDATE sys_supervisor_service SET status = %s,"):
-            # batch_update_status: SET status, pid, uptime, status_sync_time WHERE host_ip = %s AND program_name = %s
-            status, pid, uptime, status_sync_time, host_ip, program_name = params
-            updated = 0
-            for item in self.tables.get("sys_supervisor_service", []):
-                if item["host_ip"] != host_ip or item["program_name"] != program_name:
-                    continue
-                item["status"] = str(status)
-                item["pid"] = str(pid) if pid is not None else None
-                item["uptime"] = str(uptime) if uptime is not None else None
-                item["status_sync_time"] = str(status_sync_time)
-                updated += 1
-            cursor.rowcount = updated
-            return updated
-
+        # Archive
         if normalized.startswith("UPDATE sys_supervisor_service SET is_archived = 1,"):
-            archived_at, status_sync_time, update_by_id, update_by, host_ip, program_name = params
+            archived_at, update_by_id, update_by, host_ip, content_program_name = params
             updated = 0
             for item in self.tables.get("sys_supervisor_service", []):
                 self._hydrate_supervisor_defaults(item)
-                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                if item["host_ip"] != host_ip or item.get("content_program_name", item.get("program_name")) != content_program_name:
                     continue
                 item["is_archived"] = 1
                 item["archived_at"] = str(archived_at)
                 item["status"] = "STOPPED"
                 item["pid"] = None
                 item["uptime"] = None
-                item["status_sync_time"] = str(status_sync_time)
                 item["update_by_id"] = int(update_by_id)
                 item["update_by"] = str(update_by)
                 updated += 1
             cursor.rowcount = updated
             return updated
 
+        # Simple status-only update (batch_update_status / update_single_status)
+        if normalized.startswith("UPDATE sys_supervisor_service SET status = %s, pid = %s, uptime = %s, status_sync_time = %s") and "command = %s" not in normalized and "is_archived" not in normalized:
+            status, pid, uptime, status_sync_time, host_ip, content_program_name = params
+            updated = 0
+            for item in self.tables.get("sys_supervisor_service", []):
+                if item["host_ip"] != host_ip or item.get("content_program_name", item.get("program_name")) != content_program_name:
+                    continue
+                item["status"] = str(status)
+                item["pid"] = str(pid) if pid is not None else None
+                item["uptime"] = str(uptime) if uptime is not None else None
+                item["status_sync_time"] = str(status_sync_time)
+                updated += 1
+            cursor.rowcount = updated
+            return updated
+
+        # Archive
         if normalized.startswith("UPDATE sys_supervisor_service SET is_archived = 0,"):
-            restored_at, status, pid, uptime, status_sync_time, update_by_id, update_by, host_ip, program_name = params
+            restored_at, status, pid, uptime, host_ip, content_program_name = params
             updated = 0
             for item in self.tables.get("sys_supervisor_service", []):
                 self._hydrate_supervisor_defaults(item)
-                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                if item["host_ip"] != host_ip or item.get("content_program_name", item.get("program_name")) != content_program_name:
                     continue
                 item["is_archived"] = 0
                 item["restored_at"] = str(restored_at)
                 item["status"] = str(status)
                 item["pid"] = str(pid) if pid is not None else None
                 item["uptime"] = str(uptime) if uptime is not None else None
-                item["status_sync_time"] = str(status_sync_time)
-                item["update_by_id"] = int(update_by_id)
-                item["update_by"] = str(update_by)
                 updated += 1
             cursor.rowcount = updated
             return updated
+
+        # DELETE by host_ip and content_program_name
+        if "DELETE FROM sys_supervisor_service WHERE host_ip = %s AND content_program_name = %s" in normalized:
+            if self.fail_next_supervisor_delete:
+                self.fail_next_supervisor_delete = False
+                raise RuntimeError("模拟 Supervisor 主数据删除失败")
+            host_ip = str(params[0])
+            content_program_name = str(params[1])
+            rows = self.tables.get("sys_supervisor_service", [])
+            before = len(rows)
+            self.tables["sys_supervisor_service"] = [
+                item for item in rows
+                if not (item["host_ip"] == host_ip and item.get("content_program_name", item.get("program_name")) == content_program_name)
+            ]
+            deleted = before - len(self.tables["sys_supervisor_service"])
+            cursor.rowcount = deleted
+            return deleted
+
+        # DELETE by id
+        if "DELETE FROM sys_supervisor_service WHERE id = %s" in normalized:
+            if self.fail_next_supervisor_delete:
+                self.fail_next_supervisor_delete = False
+                raise RuntimeError("模拟 Supervisor 主数据删除失败")
+            record_id = int(params[0])
+            rows = self.tables.get("sys_supervisor_service", [])
+            before = len(rows)
+            self.tables["sys_supervisor_service"] = [item for item in rows if int(item["id"]) != record_id]
+            deleted = before - len(self.tables["sys_supervisor_service"])
+            cursor.rowcount = deleted
+            return deleted
+
+        # SELECT COUNT(*)
+        if normalized.startswith("SELECT COUNT(*) AS cnt FROM sys_supervisor_service"):
+            rows = list(self.tables.get("sys_supervisor_service", []))
+            if "WHERE" in normalized:
+                where_part = normalized.split("WHERE")[1].strip()
+                rows = self._filter_supervisor_rows(rows, where_part, params)
+            cursor.results = [{"cnt": len(rows)}]
+            return len(rows)
+
+        # Port conflict check SELECT
+        if normalized.startswith("SELECT id, host_ip, content_program_name, config_path, port"):
+            host_ip, port_val = params
+            rows = [
+                dict(item)
+                for item in self.tables.get("sys_supervisor_service", [])
+                if str(item.get("host_ip", "")) == str(host_ip)
+                and str(item.get("port", "")) == str(port_val)
+                and item.get("is_archived", 0) == 0
+            ]
+            cursor.results = rows
+            return len(cursor.results)
 
         raise AssertionError(f"Unsupported SQL: {normalized}")
 
@@ -1235,8 +1426,51 @@ def seed_user(fake_mysql):
 
 @pytest.fixture()
 def client(test_environment, fake_mysql, fake_supervisor):
-    """创建测试客户端。"""
+    """创建测试客户端，每次更新模块级服务实例以使用当前测试配置。"""
+    import app.api.supervisor as api_module
+    from app.services.host_service import HostService
+    from app.services.template_service import TemplateService
+    from app.services.supervisor_registry_service import ImportStagingService, SupervisorRegistryService
+    from app.services.config_file_service import ConfigFileService
+    from app.services.port_check_service import PortCheckService
+    from app.services.supervisor_service import SupervisorService
+    from app.services.supervisor_detail_service import SupervisorDetailService
+    from app.services.supervisor_import_service import SupervisorImportService
+    from app.services.supervisor_mutation_service import SupervisorMutationService
+    from app.services.supervisor_runtime_service import SupervisorRuntimeService
+    from app.services.supervisor_archive_service import SupervisorArchiveService
+    from app.services.supervisor_sync_service import SupervisorSyncService
+
     get_settings.cache_clear()
-    main_module = importlib.import_module("app.main")
-    app = main_module.create_app()
+    settings = get_settings()
+
+    # 原地更新模块级服务实例，确保路由函数使用当前测试的配置路径
+    api_module._settings = settings
+    api_module._host_service = HostService(settings)
+    api_module._template_service = TemplateService(settings)
+    api_module._registry_service = SupervisorRegistryService(settings)
+    api_module._staging_service = ImportStagingService(settings)
+    api_module._config_file_service = ConfigFileService(settings, api_module._host_service, api_module._template_service)
+    api_module._port_check_service = PortCheckService(api_module._config_file_service, api_module._host_service)
+    api_module._supervisor_service = SupervisorService(api_module._host_service)
+    api_module._detail_service = SupervisorDetailService(api_module._host_service, api_module._registry_service)
+    api_module._import_service = SupervisorImportService(
+        api_module._host_service,
+        api_module._config_file_service,
+        api_module._template_service,
+        api_module._registry_service,
+        api_module._staging_service,
+    )
+    api_module._mutation_service = SupervisorMutationService(
+        api_module._host_service, api_module._template_service, api_module._config_file_service,
+        api_module._port_check_service, api_module._supervisor_service, api_module._registry_service,
+    )
+    api_module._runtime_service = SupervisorRuntimeService(api_module._host_service, api_module._registry_service, api_module._supervisor_service)
+    api_module._archive_service = SupervisorArchiveService(api_module._host_service, api_module._config_file_service, api_module._registry_service, api_module._supervisor_service)
+    api_module._sync_service = SupervisorSyncService(
+        api_module._host_service, api_module._config_file_service, api_module._registry_service, api_module._supervisor_service, api_module._template_service,
+    )
+
+    from app.main import create_app
+    app = create_app()
     return TestClient(app)

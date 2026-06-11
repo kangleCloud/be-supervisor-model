@@ -15,23 +15,21 @@ from app.services.supervisor_registry_service import (
 def _build_create_data(
     *,
     port: int = 9001,
-    program_name: str = "demo-project_member",
-    config_name: str = "demo-project_member.ini",
-    config_path: str = "demo-project_member.ini",
+    content_program_name: str = "demo-project_member",
     file_name: str = "demo-project_member.ini",
+    config_path: str = "demo-project_member.ini",
     manage_mode: str = MANAGE_MODE_TEMPLATE_MANAGED,
 ):
+    job_name, module_name = content_program_name.rsplit("_", 1)
     return SupervisorRegistryCreateData(
         host_ip="127.0.0.1",
-        job_name="demo-project",
-        module_name="member",
-        program_name=program_name,
-        config_name=config_name,
+        job_name=job_name,
+        module_name=module_name,
         config_path=config_path,
         file_name=file_name,
-        content_program_name=program_name,
+        content_program_name=content_program_name,
         manage_mode=manage_mode,
-        baseline_content="[program:demo-project_member]\n",
+        baseline_content=f"[program:{content_program_name}]\n",
         metadata_complete=True,
         parse_warnings=(),
         java_path="/usr/local/jdk17/bin/java",
@@ -49,30 +47,27 @@ def test_registry_create_and_query(settings):
     data = _build_create_data()
 
     created = service.create(data, operator_id=1, operator_name="ops", remark="测试新增")
-    records = service.list_by_host("127.0.0.1")
-    fetched = service.get_by_program_name("127.0.0.1", "demo-project_member")
+    fetched = service.get_by_content_program_name_optional("127.0.0.1", "demo-project_member")
 
     assert created.id == 1
-    assert len(records) == 1
-    assert fetched.program_name == "demo-project_member"
-    assert fetched.config_name == "demo-project_member.ini"
+    assert fetched.content_program_name == "demo-project_member"
+    assert fetched.file_name == "demo-project_member.ini"
     assert fetched.config_path == "demo-project_member.ini"
     assert fetched.file_name == "demo-project_member.ini"
     assert fetched.content_program_name == "demo-project_member"
     assert fetched.manage_mode == MANAGE_MODE_TEMPLATE_MANAGED
 
 
-def test_registry_rejects_duplicate_program_name(settings):
+def test_registry_rejects_duplicate_content_program_name(settings):
     service = SupervisorRegistryService(settings)
     service.create(_build_create_data(), operator_id=1, operator_name="ops", remark="测试新增")
 
     with pytest.raises(ConfigAlreadyExistsError):
         service.ensure_can_create(
             _build_create_data(
-                program_name="demo-project_member",
-                config_name="other.ini",
-                config_path="other.ini",
+                content_program_name="demo-project_member",
                 file_name="other.ini",
+                config_path="other.ini",
                 port=9002,
             )
         )
@@ -85,10 +80,9 @@ def test_registry_rejects_duplicate_config_path(settings):
     with pytest.raises(ConfigAlreadyExistsError):
         service.ensure_can_create(
             _build_create_data(
-                program_name="other_member",
-                config_name="demo-project_member.ini",
-                config_path="demo-project_member.ini",
+                content_program_name="other_member",
                 file_name="demo-project_member.ini",
+                config_path="demo-project_member.ini",
                 port=9002,
             )
         )
@@ -101,10 +95,9 @@ def test_registry_rejects_duplicate_port(settings):
     with pytest.raises(PortConflictError):
         service.ensure_can_create(
             _build_create_data(
-                program_name="other_member",
-                config_name="other_member.ini",
-                config_path="other_member.ini",
+                content_program_name="other_member",
                 file_name="other_member.ini",
+                config_path="other_member.ini",
                 port=9001,
             )
         )
@@ -116,8 +109,6 @@ def test_registry_upsert_imported_uses_config_path_and_preserves_redundant_field
         host_ip="127.0.0.1",
         job_name="saas-java-admincenter",
         module_name="sjfy-admin",
-        program_name="saas-java-admincenter_sjfy-admin",
-        config_name="legacy-name.ini",
         config_path="saas/legacy-name.ini",
         file_name="legacy-name.ini",
         content_program_name="saas-java-admincenter_sjfy-admin",
@@ -157,7 +148,6 @@ def test_registry_upsert_imported_uses_config_path_and_preserves_redundant_field
     assert fetched.manage_mode == MANAGE_MODE_IMPORTED_READONLY
     assert fetched.config_path == "saas/legacy-name.ini"
     assert fetched.file_name == "legacy-name.ini"
-    assert fetched.program_name == "saas-java-admincenter_sjfy-admin"
-    assert fetched.config_name == "legacy-name.ini"
+    assert fetched.content_program_name == "saas-java-admincenter_sjfy-admin"
     assert fetched.metadata_complete is True
     assert fetched.baseline_content.endswith("user=root\n")

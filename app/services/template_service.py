@@ -102,7 +102,7 @@ class TemplateService:
             active=payload.active,
             port=payload.port,
             jar_name=payload.jar_name,
-            config_name=payload.config_name,
+            config_name=payload.file_name,
             xms=payload.xms,
             xmx=payload.xmx,
             user=payload.user,
@@ -160,6 +160,25 @@ class TemplateService:
         sections = parser.sections()
         if len(sections) != 1 or not sections[0].startswith("program:"):
             raise ParamError("Supervisor 配置必须包含且仅包含一个 [program:*] 段")
+
+    @classmethod
+    def ensure_program_identity(
+        cls,
+        *,
+        job_name: str | None,
+        module_name: str | None,
+        content_program_name: str,
+    ) -> str:
+        """校验 contentProgramName 是否与模板规则生成的 program_name 一致。"""
+        if not job_name or not module_name:
+            raise ParamError("无法根据 jobName/moduleName 验证 contentProgramName")
+        expected_program_name = cls.build_program_name(job_name, module_name)
+        safe_content_program_name = ensure_safe_program_name(content_program_name)
+        if safe_content_program_name != expected_program_name:
+            raise ParamError(
+                f"contentProgramName 与模板 program_name 不一致: expected={expected_program_name}, actual={safe_content_program_name}"
+            )
+        return expected_program_name
 
     @staticmethod
     def parse(content: str) -> ParsedConfig:

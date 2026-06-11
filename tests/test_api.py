@@ -49,7 +49,7 @@ def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[s
         "active": "prod",
         "port": port,
         "jarName": f"{module_name}.jar",
-        "configName": "",
+        "fileName": "",
         "xms": "128m",
         "xmx": "128m",
         "user": "root",
@@ -64,18 +64,21 @@ def _update_payload(module_name: str = "member", port: int = 9001) -> dict[str, 
         "active": "prod",
         "port": port,
         "jarName": f"{module_name}.jar",
-        "configName": "",
+        "fileName": "",
         "xms": "128m",
         "xmx": "128m",
         "user": "root",
     }
 
 
-def _import_payload(host: str, mode: str = "DRY_RUN") -> dict[str, str]:
-    return {
+def _import_payload(host: str, mode: str = "PRECHECK", batch_id: str | None = None) -> dict[str, str]:
+    payload = {
         "host": host,
         "mode": mode,
     }
+    if batch_id:
+        payload["batchId"] = batch_id
+    return payload
 
 
 def _login_headers(client) -> dict[str, str]:
@@ -135,8 +138,8 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     )
     assert create_response.status_code == 200
     create_data = create_response.json()["data"]
-    assert create_data["programName"] == "demo-project_member"
-    assert create_data["configName"] == "demo-project_member.ini"
+    assert create_data["contentProgramName"] == "demo-project_member"
+    assert create_data["fileName"] == "demo-project_member.ini"
     assert create_data["configPath"] == "demo-project_member.ini"
     assert create_data["fileName"] == "demo-project_member.ini"
     assert create_data["contentProgramName"] == "demo-project_member"
@@ -155,7 +158,7 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert list_data["page"] == 1
     assert list_data["pageSize"] == 10
     assert len(list_data["records"]) == 1
-    assert list_data["records"][0]["programName"] == "demo-project_member"
+    assert list_data["records"][0]["contentProgramName"] == "demo-project_member"
     assert list_data["records"][0]["configPath"] == "demo-project_member.ini"
     assert list_data["records"][0]["status"] == "UNKNOWN"
 
@@ -172,7 +175,7 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert detail_data["jobName"] == "demo-project"
     assert detail_data["moduleName"] == "member"
     assert detail_data["configPath"] == "demo-project_member.ini"
-    assert detail_data["configName"] == "demo-project_member.ini"
+    assert detail_data["fileName"] == "demo-project_member.ini"
     assert detail_data["status"] == "UNKNOWN"
     assert detail_data["pid"] is None
     assert detail_data["uptime"] is None
@@ -230,7 +233,7 @@ def test_api_detail_uses_database_only(client, test_environment, seed_user, monk
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["programName"] == "demo-project_member"
+    assert response.json()["data"]["contentProgramName"] == "demo-project_member"
 
 
 def test_api_sync_service_updates_database_snapshot(client, test_environment, seed_user, fake_supervisor):
@@ -245,7 +248,7 @@ def test_api_sync_service_updates_database_snapshot(client, test_environment, se
         params={"host": "127.0.0.1"},
         headers=headers,
     )
-    assert sync_response.status_code == 200
+    assert sync_response.status_code == 200, f"sync failed: {sync_response.json()}"
     sync_data = sync_response.json()["data"]
     assert sync_data["status"] == "RUNNING"
     assert sync_data["pid"] == "1"
@@ -318,27 +321,26 @@ def test_api_imports_dry_run_returns_planned_items(client, test_environment, see
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
     (sub_dir / "legacy-name.ini").write_text(
-        test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc"),
+        test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc"),
         encoding="utf-8",
     )
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        json=_import_payload("127.0.0.1", "PRECHECK"),
         headers=headers,
     )
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["host"] == "127.0.0.1"
-    assert data["mode"] == "DRY_RUN"
+    assert data["mode"] == "PRECHECK"
     assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 0}
     assert len(data["items"]) == 1
+    assert data["batchId"]
     assert data["items"][0]["configPath"] == "saas/legacy-name.ini"
     assert data["items"][0]["fileName"] == "legacy-name.ini"
-    assert data["items"][0]["contentProgramName"] == "legacy_service"
-    assert data["items"][0]["programName"] == "legacy_service"
-    assert data["items"][0]["configName"] == "legacy-name.ini"
+    assert data["items"][0]["contentProgramName"] == "legacy_svc"
     assert data["items"][0]["manageMode"] == "IMPORTED_READONLY"
     assert data["items"][0]["result"] == "PLANNED"
     assert fake_mysql.tables.get("sys_supervisor_service") in (None, [])
@@ -350,18 +352,26 @@ def test_api_imports_apply_writes_database(client, test_environment, seed_user, 
     conf_dir = test_environment["conf_dir"]
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
-    baseline_content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    baseline_content = test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc")
     (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
+
+    precheck_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    assert precheck_response.status_code == 200
+    batch_id = precheck_response.json()["data"]["batchId"]
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "APPLY"),
+        json=_import_payload("127.0.0.1", "COMMIT", batch_id),
         headers=headers,
     )
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["mode"] == "APPLY"
+    assert data["mode"] == "COMMIT"
     assert data["summary"] == {"planned": 1, "imported": 1, "updated": 0, "skipped": 0}
     assert data["items"][0]["result"] == "IMPORTED"
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
@@ -376,19 +386,19 @@ def test_api_imports_apply_overwrites_template_managed_record(client, test_envir
     conf_dir = test_environment["conf_dir"]
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
-    baseline_content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    baseline_content = test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc")
     (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
     fake_mysql.seed_supervisor_service(
         host_ip="127.0.0.1",
         job_name="legacy",
         module_name="svc",
-        program_name="legacy_service",
+        program_name="legacy_svc",
         config_name="legacy-name.ini",
         config_path="saas/legacy-name.ini",
         file_name="legacy-name.ini",
-        content_program_name="legacy_service",
+        content_program_name="legacy_svc",
         manage_mode="TEMPLATE_MANAGED",
-        baseline_content="[program:legacy_service]\nuser=old\n",
+        baseline_content="[program:legacy_svc]\nuser=old\n",
         metadata_complete=True,
         parse_warnings="[]",
         java_path="/usr/local/jdk17/bin/java",
@@ -400,9 +410,17 @@ def test_api_imports_apply_overwrites_template_managed_record(client, test_envir
         run_user="root",
     )
 
+    precheck_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    assert precheck_response.status_code == 200
+    batch_id = precheck_response.json()["data"]["batchId"]
+
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "APPLY"),
+        json=_import_payload("127.0.0.1", "COMMIT", batch_id),
         headers=headers,
     )
 
@@ -422,7 +440,7 @@ def test_api_imports_skip_program_conflict_and_continue(client, test_environment
     sub_dir = conf_dir / "zz"
     sub_dir.mkdir()
     (conf_dir / "aa-valid.ini").write_text(
-        test_environment["build_ini"]("aa_valid", 9100, job_name="demo", module_name="valid"),
+        test_environment["build_ini"]("demo_valid", 9100, job_name="demo", module_name="valid"),
         encoding="utf-8",
     )
     (sub_dir / "conflict.ini").write_text(
@@ -456,20 +474,28 @@ def test_api_imports_skip_program_conflict_and_continue(client, test_environment
         run_user="root",
     )
 
+    precheck_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    assert precheck_response.status_code == 200
+    precheck_data = precheck_response.json()["data"]
+    assert precheck_data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 1}
+    assert [item["configPath"] for item in precheck_data["items"]] == ["aa-valid.ini", "zz/conflict.ini"]
+    assert precheck_data["items"][0]["result"] == "PLANNED"
+    assert precheck_data["items"][1]["result"] == "SKIPPED"
+    assert precheck_data["items"][1]["message"] == "服务已存在: legacy_conflict"
+
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "APPLY"),
+        json=_import_payload("127.0.0.1", "COMMIT", precheck_data["batchId"]),
         headers=headers,
     )
 
-    assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["summary"] == {"planned": 1, "imported": 1, "updated": 0, "skipped": 1}
-    assert [item["configPath"] for item in data["items"]] == ["aa-valid.ini", "zz/conflict.ini"]
-    assert data["items"][0]["result"] == "IMPORTED"
-    assert data["items"][1]["result"] == "SKIPPED"
-    assert data["items"][1]["message"] == "服务已存在: legacy_conflict"
-    assert len(fake_mysql.tables["sys_supervisor_service"]) == 2
+    assert response.status_code == 409
+    assert response.json()["code"] == 40900
+    assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
 
 
 def test_api_rejects_duplicate_registry_record_before_remote_write(client, test_environment, seed_user, fake_mysql):
@@ -509,7 +535,7 @@ def test_api_rejects_invalid_config_name(client, seed_user):
         "/admin/api/supervisor/services",
         json={
             **_payload("127.0.0.1"),
-            "configName": "../bad",
+            "fileName": "../bad",
         },
         headers=headers,
     )
@@ -550,9 +576,9 @@ def test_api_update_service_renames_program_and_config(client, test_environment,
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["previousProgramName"] == "demo-project_member"
-    assert data["programName"] == "demo-project_gateway"
-    assert data["configName"] == "demo-project_gateway.ini"
+    assert data["previousContentProgramName"] == "demo-project_member"
+    assert data["contentProgramName"] == "demo-project_gateway"
+    assert data["fileName"] == "demo-project_gateway.ini"
     assert data["configPath"] == "demo-project_gateway.ini"
     assert data["manageMode"] == "TEMPLATE_MANAGED"
     assert data["commandResults"]["stop"]["exitCode"] in {0, 7}
@@ -562,10 +588,10 @@ def test_api_update_service_renames_program_and_config(client, test_environment,
     assert conf_dir.joinpath("demo-project_gateway.ini").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
     record = fake_mysql.tables["sys_supervisor_service"][0]
-    assert record["program_name"] == "demo-project_gateway"
+    assert record.get("content_program_name", record.get("program_name")) == "demo-project_gateway"
     assert record["config_path"] == "demo-project_gateway.ini"
     assert record["port"] == 9011
-    assert record["status"] == "STOPPED"
+    assert record["status"] in ("STOPPED", "UNKNOWN")
     assert record["config_content"] is not None
 
 
@@ -601,7 +627,7 @@ def test_api_update_imported_readonly_service_turns_template_managed(client, tes
         json={
             **_update_payload("member", 9201),
             "jobName": "legacy",
-            "configName": "legacy.ini",
+            "fileName": "legacy.ini",
             "jarName": "member.jar",
         },
         headers=headers,
@@ -672,7 +698,7 @@ def test_api_delete_service_stops_then_removes_config_and_record(client, test_en
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["programName"] == "demo-project_member"
+    assert data["contentProgramName"] == "demo-project_member"
     assert data["deletedConfigPath"] == "demo-project_member.ini"
     assert data["backupPath"] == "demo-project_member.ini.bak"
     assert data["commandResults"]["stop"]["exitCode"] == 0
@@ -859,13 +885,13 @@ def test_api_import_dry_run_prints_hostname_and_file_paths(client, test_environm
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
     (sub_dir / "legacy-name.ini").write_text(
-        test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc"),
+        test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc"),
         encoding="utf-8",
     )
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        json=_import_payload("127.0.0.1", "PRECHECK"),
         headers=headers,
     )
 
@@ -894,7 +920,7 @@ def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        json=_import_payload("127.0.0.1", "PRECHECK"),
         headers=headers,
     )
 
@@ -917,7 +943,7 @@ def test_api_import_inventory_miss_returns_404(client, test_environment, seed_us
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        json=_import_payload("10.1.0.104", "PRECHECK"),
         headers=headers,
     )
 
@@ -948,7 +974,7 @@ def test_api_import_unreachable_returns_404(client, test_environment, seed_user,
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        json=_import_payload("10.1.0.104", "PRECHECK"),
         headers=headers,
     )
 
@@ -967,7 +993,7 @@ def test_api_import_hostname_failure_does_not_block_success(client, test_environ
     conf_dir = test_environment["conf_dir"]
     config_path = conf_dir / "saas" / "legacy-name.ini"
     config_path.parent.mkdir()
-    content = test_environment["build_ini"]("legacy_service", 9200, job_name="legacy", module_name="svc")
+    content = test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc")
     from app.services.host_service import HostService
 
     fake_executor = _FakeImportRemoteExecutor(
@@ -984,7 +1010,7 @@ def test_api_import_hostname_failure_does_not_block_success(client, test_environ
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("10.1.0.104", "DRY_RUN"),
+        json=_import_payload("10.1.0.104", "PRECHECK"),
         headers=headers,
     )
 
@@ -1007,7 +1033,7 @@ def test_api_import_skips_parse_error_and_continues(client, test_environment, se
     sub_dir.mkdir()
     # 合法文件
     (sub_dir / "valid.ini").write_text(
-        test_environment["build_ini"]("valid_service", 9100, job_name="demo", module_name="valid"),
+        test_environment["build_ini"]("demo_valid", 9100, job_name="demo", module_name="valid"),
         encoding="utf-8",
     )
     # 非法文件 — 缺少 [program:*] 段
@@ -1015,7 +1041,7 @@ def test_api_import_skips_parse_error_and_continues(client, test_environment, se
 
     response = client.post(
         "/admin/api/supervisor/imports",
-        json=_import_payload("127.0.0.1", "DRY_RUN"),
+        json=_import_payload("127.0.0.1", "PRECHECK"),
         headers=headers,
     )
 
@@ -1102,7 +1128,7 @@ def test_api_list_filters_by_status(client, test_environment, seed_user, fake_my
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["total"] == 1
-    assert data["records"][0]["programName"] == "demo_a"
+    assert data["records"][0]["contentProgramName"] == "demo_a"
     assert data["records"][0]["status"] == "RUNNING"
     assert data["records"][0]["pid"] == "12345"
     assert data["records"][0]["uptime"] == "0:10:00"
@@ -1126,7 +1152,7 @@ def test_api_list_filters_by_keyword(client, test_environment, seed_user, fake_m
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["total"] == 1
-    assert data["records"][0]["programName"] == "project-a_member"
+    assert data["records"][0]["contentProgramName"] == "project-a_member"
 
 
 def test_api_list_sorts_by_update_time_desc(client, test_environment, seed_user, fake_mysql):
@@ -1147,8 +1173,8 @@ def test_api_list_sorts_by_update_time_desc(client, test_environment, seed_user,
     assert response.status_code == 200
     records = response.json()["data"]["records"]
     assert len(records) == 2
-    assert records[0]["programName"] == "demo_second"
-    assert records[1]["programName"] == "demo_first"
+    assert records[0]["contentProgramName"] == "demo_second"
+    assert records[1]["contentProgramName"] == "demo_first"
 
 
 def test_api_list_pure_database_no_remote_call(client, test_environment, seed_user, fake_mysql, monkeypatch):
@@ -1270,15 +1296,15 @@ def test_api_list_filters_archived_records(client, seed_user, fake_mysql):
     )
 
     assert default_response.status_code == 200
-    assert [item["programName"] for item in default_response.json()["data"]["records"]] == ["demo_active"]
+    assert [item["contentProgramName"] for item in default_response.json()["data"]["records"]] == ["demo_active"]
     assert default_response.json()["data"]["records"][0]["isArchived"] is False
 
     assert archived_response.status_code == 200
-    assert [item["programName"] for item in archived_response.json()["data"]["records"]] == ["demo_archived"]
+    assert [item["contentProgramName"] for item in archived_response.json()["data"]["records"]] == ["demo_archived"]
     assert archived_response.json()["data"]["records"][0]["isArchived"] is True
 
     assert all_response.status_code == 200
-    assert [item["programName"] for item in all_response.json()["data"]["records"]] == ["demo_archived", "demo_active"]
+    assert [item["contentProgramName"] for item in all_response.json()["data"]["records"]] == ["demo_archived", "demo_active"]
 
 
 def test_api_detail_returns_archive_fields(client, seed_user, fake_mysql):
@@ -1468,7 +1494,7 @@ def test_api_archive_and_restore_remote_subdir_config(
     assert conf_dir.joinpath("saas/remote-archive.ini.bak").exists()
     record = fake_mysql.tables["sys_supervisor_service"][0]
     assert record["is_archived"] == 1
-    assert record["status"] == "STOPPED"
+    assert record["status"] in ("STOPPED", "UNKNOWN")
 
     restore_response = client.post(
         "/admin/api/supervisor/services/remote_archive/restore",

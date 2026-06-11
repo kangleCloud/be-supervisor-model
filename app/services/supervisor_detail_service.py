@@ -20,5 +20,5 @@ class SupervisorDetailService:
     def get_service_detail(self, host: str, program_name: str) -> dict[str, object]:
         """返回数据库中的单服务详情快照。"""
         host_config = self.host_service.get_host(host)
-        record = self.registry_service.get_by_program_name(host, program_name)
+        record = self.registry_service.get_by_content_program_name(host, program_name)
         return ServiceDetailResponse.from_record(record, host_name=host_config.name).model_dump(by_alias=True)

@@ -29,9 +29,7 @@ def test_build_registry_data_keeps_file_name_and_content_program_name_redundant(
     assert record.host_ip == "10.1.0.104"
     assert record.config_path == "saas/legacy-name.ini"
     assert record.file_name == "legacy-name.ini"
-    assert record.config_name == "legacy-name.ini"
     assert record.content_program_name == "legacy_sjfy-admin"
-    assert record.program_name == "legacy_sjfy-admin"
     assert record.metadata_complete is False
     assert any("重复 key" in warning for warning in record.parse_warnings)
 

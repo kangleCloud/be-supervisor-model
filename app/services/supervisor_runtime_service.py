@@ -41,23 +41,23 @@ class SupervisorRuntimeService:
     def _run_action(self, host: str, program_name: str, *, action: str) -> dict[str, object]:
         record = self._load_active_record(host, program_name)
         action_label = {"start": "启动", "stop": "停止", "restart": "重启"}[action]
-        LOGGER.info("%s服务：目标主机=%s，服务名称=%s", action_label, host, record.program_name)
+        LOGGER.info("%s服务：目标主机=%s，服务名称=%s", action_label, host, record.content_program_name)
 
         if action == "start":
-            command_result = self.supervisor_service.start(host, record.program_name)
+            command_result = self.supervisor_service.start(host, record.content_program_name)
             fallback_status = "UNKNOWN"
         elif action == "stop":
-            command_result = self.supervisor_service.stop(host, record.program_name)
+            command_result = self.supervisor_service.stop(host, record.content_program_name)
             fallback_status = "STOPPED"
         else:
-            command_result = self.supervisor_service.restart(host, record.program_name)
+            command_result = self.supervisor_service.restart(host, record.content_program_name)
             fallback_status = "UNKNOWN"
 
-        status, pid, uptime = self._refresh_runtime_snapshot(host, record.program_name, fallback_status=fallback_status)
-        LOGGER.info("%s服务成功：目标主机=%s，服务名称=%s，状态=%s", action_label, host, record.program_name, status)
+        status, pid, uptime = self._refresh_runtime_snapshot(host, record.content_program_name, fallback_status=fallback_status)
+        LOGGER.info("%s服务成功：目标主机=%s，服务名称=%s，状态=%s", action_label, host, record.content_program_name, status)
         return RuntimeActionResponse(
             host=host,
-            programName=record.program_name,
+            contentProgramName=record.content_program_name,
             action=action,
             status=status,
             commandResult=command_result,
@@ -65,9 +65,9 @@ class SupervisorRuntimeService:
 
     def _load_active_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
         self.host_service.get_host(host)
-        record = self.registry_service.get_by_program_name(host, program_name)
+        record = self.registry_service.get_by_content_program_name(host, program_name)
         if record.is_archived:
-            LOGGER.warning("服务已归档，禁止运行操作：目标主机=%s，服务名称=%s", host, record.program_name)
+            LOGGER.warning("服务已归档，禁止运行操作：目标主机=%s，服务名称=%s", host, record.content_program_name)
             raise ArchivedServiceOperationError()
         return record
 

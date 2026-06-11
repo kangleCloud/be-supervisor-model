@@ -10,6 +10,7 @@ from app.executor.base import ExecutorRuntimeError
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
 from app.services.supervisor_registry_service import (
+    ImportStagingService,
     MANAGE_MODE_IMPORTED_READONLY,
     MANAGE_MODE_TEMPLATE_MANAGED,
     SupervisorRegistryCreateData,
@@ -19,8 +20,8 @@ from app.services.supervisor_registry_service import (
 from app.services.template_service import TemplateService
 
 
-IMPORT_MODE_DRY_RUN = "DRY_RUN"
-IMPORT_MODE_APPLY = "APPLY"
+IMPORT_MODE_DRY_RUN = "PRECHECK"
+IMPORT_MODE_APPLY = "COMMIT"
 ALLOWED_IMPORT_MODES = {IMPORT_MODE_DRY_RUN, IMPORT_MODE_APPLY}
 
 IMPORT_RESULT_PLANNED = "PLANNED"
@@ -54,8 +55,6 @@ class SupervisorImportItem:
     config_path: str
     file_name: str
     content_program_name: str | None
-    program_name: str | None
-    config_name: str | None
     job_name: str | None
     module_name: str | None
     java_path: str | None
@@ -76,8 +75,6 @@ class SupervisorImportItem:
             "configPath": self.config_path,
             "fileName": self.file_name,
             "contentProgramName": self.content_program_name,
-            "programName": self.program_name,
-            "configName": self.config_name,
             "jobName": self.job_name,
             "moduleName": self.module_name,
             "javaPath": self.java_path,
@@ -119,6 +116,7 @@ class SupervisorImportReport:
 
     host: str
     mode: str
+    batch_id: str
     summary: SupervisorImportSummary
     items: tuple[SupervisorImportItem, ...]
 
@@ -126,6 +124,7 @@ class SupervisorImportReport:
         return {
             "host": self.host,
             "mode": self.mode,
+            "batchId": self.batch_id,
             "summary": self.summary.to_dict(),
             "items": [item.to_dict() for item in self.items],
         }
@@ -189,11 +188,13 @@ class SupervisorImportService:
         config_file_service: ConfigFileService,
         template_service: TemplateService,
         registry_service: SupervisorRegistryService,
+        staging_service: ImportStagingService,
     ):
         self.host_service = host_service
         self.config_file_service = config_file_service
         self.template_service = template_service
         self.registry_service = registry_service
+        self.staging_service = staging_service
 
     def execute(
         self,
@@ -202,28 +203,144 @@ class SupervisorImportService:
         mode: str,
         operator_id: int,
         operator_name: str,
+        batch_id: str | None = None,
         recursive: bool = True,
     ) -> SupervisorImportReport:
-        """执行单主机初始化导入，返回逐文件结果。"""
-        overall_start = time.time()
         normalized_mode = self._normalize_mode(mode)
+        if normalized_mode == IMPORT_MODE_DRY_RUN:
+            return self._execute_precheck(
+                host=host,
+                operator_id=operator_id,
+                operator_name=operator_name,
+                recursive=recursive,
+            )
+        return self._execute_commit(
+            host=host,
+            batch_id=(batch_id or "").strip(),
+            operator_id=operator_id,
+            operator_name=operator_name,
+        )
+
+    def _execute_precheck(
+        self,
+        *,
+        host: str,
+        operator_id: int,
+        operator_name: str,
+        recursive: bool,
+    ) -> SupervisorImportReport:
+        """扫描远端配置，写入暂存表并返回预检明细。"""
+        overall_start = time.time()
         host_config = self.host_service.get_host(host)
         safe_host = host_config.ip
         executor = self.host_service.get_executor(safe_host)
+        batch_id = self.staging_service.create_batch_id()
         _print_hostname_diagnostic(safe_host, host_config.executor_type, executor)
 
+        self.staging_service.delete_expired_batches()
+        self.staging_service.clear_operator_host_batches(host_ip=safe_host, operator_id=operator_id)
+
+        config_paths = self._scan_config_paths(safe_host, host_config.executor_type, recursive)
+        total = len(config_paths)
+        items: list[SupervisorImportItem] = []
+        staging_rows: list[dict[str, object]] = []
+        batch_program_paths: dict[str, str] = {}
+        for index, config_path in enumerate(config_paths, start=1):
+            item, staging_row = self._precheck_config_path(
+                host=safe_host,
+                config_path=config_path,
+                index=index,
+                total=total,
+                batch_program_paths=batch_program_paths,
+            )
+            items.append(item)
+            staging_rows.append(staging_row)
+
+        self.staging_service.insert_batch(
+            batch_id=batch_id,
+            host_ip=safe_host,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            items=staging_rows,
+        )
+
+        result_items = tuple(items)
+        summary = SupervisorImportSummary(
+            planned=sum(1 for item in result_items if item.result != IMPORT_RESULT_SKIPPED),
+            imported=0,
+            updated=0,
+            skipped=sum(1 for item in result_items if item.result == IMPORT_RESULT_SKIPPED),
+        )
+        elapsed = time.time() - overall_start
+        print(
+            f"[SUPERVISOR_IMPORT_DEBUG] 导入汇总: "
+            f"host={safe_host}, mode={IMPORT_MODE_DRY_RUN}, batchId={batch_id}, "
+            f"total={total}, planned={summary.planned}, skipped={summary.skipped}, elapsed={elapsed:.3f}s"
+        )
+        return SupervisorImportReport(
+            host=safe_host,
+            mode=IMPORT_MODE_DRY_RUN,
+            batch_id=batch_id,
+            summary=summary,
+            items=result_items,
+        )
+
+    def _execute_commit(
+        self,
+        *,
+        host: str,
+        batch_id: str,
+        operator_id: int,
+        operator_name: str,
+    ) -> SupervisorImportReport:
+        """按 batchId 把预检批次原子提交到正式表。"""
+        if not batch_id:
+            raise ParamError("COMMIT 模式必须传 batchId")
+        safe_host = self.host_service.get_host(host).ip
+        commit_results = self.staging_service.commit_batch(
+            batch_id=batch_id,
+            host_ip=safe_host,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            registry_service=self.registry_service,
+            remark=IMPORT_REMARK,
+        )
+        items = tuple(
+            self._build_item_from_record(
+                record,
+                result=IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED,
+                message=self._build_apply_message(existing_by_path, created),
+            )
+            for record, created, existing_by_path in commit_results
+        )
+        summary = SupervisorImportSummary(
+            planned=len(items),
+            imported=sum(1 for item in items if item.result == IMPORT_RESULT_IMPORTED),
+            updated=sum(1 for item in items if item.result == IMPORT_RESULT_UPDATED),
+            skipped=0,
+        )
+        return SupervisorImportReport(
+            host=safe_host,
+            mode=IMPORT_MODE_APPLY,
+            batch_id=batch_id,
+            summary=summary,
+            items=items,
+        )
+
+    def _scan_config_paths(self, host: str, executor_type: str, recursive: bool) -> list[str]:
+        """统一扫描目标主机配置目录。"""
         try:
             config_paths = sorted(
                 self.config_file_service.to_relative_config_path(path)
                 for path in self.config_file_service.list_config_paths(
-                    safe_host,
+                    host,
                     include_backups=False,
                     recursive=recursive,
                 )
             )
         except FileOperationError as exc:
             kind = _detect_preflight_failure_kind(exc.msg)
-            _print_preflight_failure_diagnostic(safe_host, host_config.executor_type, kind, exc.msg)
+            _print_preflight_failure_diagnostic(host, executor_type, kind, exc.msg)
             if kind == IMPORT_PREFLIGHT_KIND_INVENTORY_MISS:
                 raise ConfigNotFoundError("目标主机未匹配") from exc
             if kind == IMPORT_PREFLIGHT_KIND_UNREACHABLE:
@@ -233,56 +350,24 @@ class SupervisorImportService:
         _print_config_paths_diagnostic(config_paths)
         if not config_paths:
             _print_preflight_failure_diagnostic(
-                safe_host,
-                host_config.executor_type,
+                host,
+                executor_type,
                 IMPORT_PREFLIGHT_KIND_EMPTY_DIR,
                 "远端目录下无可用配置文件",
             )
             raise ConfigNotFoundError("远端目录下无可用配置文件")
+        return config_paths
 
-        total = len(config_paths)
-        items: list[SupervisorImportItem] = []
-        for index, config_path in enumerate(config_paths, start=1):
-            item = self._process_config_path_with_diagnostics(
-                host=safe_host,
-                config_path=config_path,
-                mode=normalized_mode,
-                operator_id=operator_id,
-                operator_name=operator_name,
-                index=index,
-                total=total,
-            )
-            items.append(item)
-
-        result_items = tuple(items)
-        summary = SupervisorImportSummary(
-            planned=sum(1 for item in result_items if item.result != IMPORT_RESULT_SKIPPED),
-            imported=sum(1 for item in result_items if item.result == IMPORT_RESULT_IMPORTED),
-            updated=sum(1 for item in result_items if item.result == IMPORT_RESULT_UPDATED),
-            skipped=sum(1 for item in result_items if item.result == IMPORT_RESULT_SKIPPED),
-        )
-        elapsed = time.time() - overall_start
-        print(
-            f"[SUPERVISOR_IMPORT_DEBUG] 导入汇总: "
-            f"host={safe_host}, mode={normalized_mode}, "
-            f"total={total}, planned={summary.planned}, "
-            f"imported={summary.imported}, updated={summary.updated}, "
-            f"skipped={summary.skipped}, elapsed={elapsed:.3f}s"
-        )
-        return SupervisorImportReport(host=safe_host, mode=normalized_mode, summary=summary, items=result_items)
-
-    def _process_config_path_with_diagnostics(
+    def _precheck_config_path(
         self,
         *,
         host: str,
         config_path: str,
-        mode: str,
-        operator_id: int,
-        operator_name: str,
         index: int,
         total: int,
-    ) -> SupervisorImportItem:
-        """单文件处理，带逐阶段诊断与耗时输出。"""
+        batch_program_paths: dict[str, str],
+    ) -> tuple[SupervisorImportItem, dict[str, object]]:
+        """单文件预检，返回面向前端的 item 与暂存表写入行。"""
         file_start = time.time()
         file_name = PurePosixPath(config_path).name
         prefix = f"[SUPERVISOR_IMPORT_DEBUG] [{index}/{total}] {config_path}"
@@ -296,13 +381,17 @@ class SupervisorImportService:
             read_elapsed = time.time() - read_start
             print(f"{prefix} read_done elapsed={read_elapsed:.3f}s")
         except ConfigNotFoundError as exc:
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except FileOperationError as exc:
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except ExecutorRuntimeError as exc:
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=str(exc)))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=str(exc))
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except Exception as exc:  # noqa: BLE001
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc)))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc))
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
 
         # === parse ===
         try:
@@ -311,51 +400,46 @@ class SupervisorImportService:
             parse_elapsed = time.time() - parse_start
             print(f"{prefix} parse_done programName={data.content_program_name} metadataComplete={data.metadata_complete} warnings={len(data.parse_warnings)} elapsed={parse_elapsed:.3f}s")
         except AppError as exc:
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
         except Exception as exc:  # noqa: BLE001
-            return _diagnostic_finish_and_return(prefix, file_start, self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc)))
+            item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc))
+            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
 
         # === plan ===
         try:
+            duplicate_path = batch_program_paths.get(data.content_program_name)
+            if duplicate_path is not None and duplicate_path != config_path:
+                raise ParamError(f"同一批次存在重复 contentProgramName: {data.content_program_name}")
             plan_start = time.time()
             normalized, existing_by_path = self.registry_service.plan_import_upsert(data)
             plan_elapsed = time.time() - plan_start
-            result_so_far = IMPORT_RESULT_PLANNED if mode == IMPORT_MODE_DRY_RUN else IMPORT_RESULT_IMPORTED if existing_by_path is None else IMPORT_RESULT_UPDATED
+            batch_program_paths[normalized.content_program_name] = config_path
+            result_so_far = IMPORT_RESULT_PLANNED
             print(f"{prefix} plan_done result={result_so_far} elapsed={plan_elapsed:.3f}s")
         except AppError as exc:
             skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, skipped)
+            return _diagnostic_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
         except Exception as exc:  # noqa: BLE001
             skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, skipped)
+            return _diagnostic_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
 
-        # === dry-run early return ===
-        if mode == IMPORT_MODE_DRY_RUN:
-            item = self._build_item_from_data(normalized, result=IMPORT_RESULT_PLANNED, message=self._build_dry_run_message(existing_by_path))
-            return _diagnostic_finish_and_return(prefix, file_start, item)
-
-        # === apply ===
-        try:
-            apply_start = time.time()
-            record, created = self.registry_service.upsert_imported(normalized, operator_id=operator_id, operator_name=operator_name, remark=IMPORT_REMARK)
-            apply_elapsed = time.time() - apply_start
-            result_str = IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED
-            print(f"{prefix} apply_done result={result_str} elapsed={apply_elapsed:.3f}s")
-        except AppError as exc:
-            skipped = self._build_item_from_data(normalized, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, skipped)
-        except Exception as exc:  # noqa: BLE001
-            skipped = self._build_item_from_data(normalized, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, skipped)
-
-        item = self._build_item_from_record(record, result=IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED, message=self._build_apply_message(existing_by_path, created))
-        return _diagnostic_finish_and_return(prefix, file_start, item)
+        item = self._build_item_from_data(
+            normalized,
+            result=IMPORT_RESULT_PLANNED,
+            message=self._build_dry_run_message(existing_by_path),
+        )
+        return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_data(
+            normalized,
+            result=IMPORT_RESULT_PLANNED,
+            message=item.message,
+        )
 
     @staticmethod
     def _normalize_mode(mode: str) -> str:
         normalized = (mode or "").strip().upper()
         if normalized not in ALLOWED_IMPORT_MODES:
-            raise ParamError("mode 只支持 DRY_RUN 或 APPLY")
+            raise ParamError("mode 只支持 PRECHECK 或 COMMIT")
         return normalized
 
     @staticmethod
@@ -390,8 +474,6 @@ class SupervisorImportService:
             config_path=data.config_path,
             file_name=data.file_name,
             content_program_name=data.content_program_name,
-            program_name=data.program_name,
-            config_name=data.config_name,
             job_name=data.job_name,
             module_name=data.module_name,
             java_path=data.java_path,
@@ -408,6 +490,59 @@ class SupervisorImportService:
             message=message,
         )
 
+    def _build_staging_row_from_data(
+        self,
+        data: SupervisorRegistryCreateData,
+        *,
+        result: str,
+        message: str,
+    ) -> dict[str, object]:
+        return {
+            "config_path": data.config_path,
+            "file_name": data.file_name,
+            "content_program_name": data.content_program_name,
+            "baseline_content": data.baseline_content,
+            "metadata_complete": data.metadata_complete,
+            "parse_warnings": tuple(data.parse_warnings),
+            "job_name": data.job_name,
+            "module_name": data.module_name,
+            "java_path": data.java_path,
+            "active_profile": data.active_profile,
+            "port": data.port,
+            "jar_name": data.jar_name,
+            "xms": data.xms,
+            "xmx": data.xmx,
+            "run_user": data.run_user,
+            "result": result,
+            "message": message,
+        }
+
+    def _build_staging_row_from_item(
+        self,
+        item: SupervisorImportItem,
+        *,
+        baseline_content: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "config_path": item.config_path,
+            "file_name": item.file_name,
+            "content_program_name": item.content_program_name,
+            "baseline_content": baseline_content,
+            "metadata_complete": item.metadata_complete,
+            "parse_warnings": tuple(item.parse_warnings),
+            "job_name": item.job_name,
+            "module_name": item.module_name,
+            "java_path": item.java_path,
+            "active_profile": item.active,
+            "port": item.port,
+            "jar_name": item.jar_name,
+            "xms": item.xms,
+            "xmx": item.xmx,
+            "run_user": item.user,
+            "result": item.result,
+            "message": item.message,
+        }
+
     @staticmethod
     def _build_item_from_record(
         record: SupervisorRegistryRecord,
@@ -419,8 +554,6 @@ class SupervisorImportService:
             config_path=record.config_path,
             file_name=record.file_name,
             content_program_name=record.content_program_name,
-            program_name=record.program_name,
-            config_name=record.config_name,
             job_name=record.job_name,
             module_name=record.module_name,
             java_path=record.java_path,
@@ -443,8 +576,6 @@ class SupervisorImportService:
             config_path=config_path,
             file_name=file_name,
             content_program_name=None,
-            program_name=None,
-            config_name=file_name,
             job_name=None,
             module_name=None,
             java_path=None,
@@ -473,8 +604,6 @@ def build_import_registry_data(
         host_ip=host_ip,
         job_name=parsed.job_name,
         module_name=parsed.module_name,
-        program_name=parsed.program_name,
-        config_name=raw_config.config_name,
         config_path=raw_config.config_path,
         file_name=raw_config.file_name,
         content_program_name=parsed.program_name,

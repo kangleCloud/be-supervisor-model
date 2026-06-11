@@ -17,7 +17,7 @@ def test_template_render_and_parse(settings):
         active="prod",
         port=9001,
         jarName="sjfy-admin.jar",
-        configName="",
+        fileName="",
         xms="128m",
         xmx="256m",
         user="root",

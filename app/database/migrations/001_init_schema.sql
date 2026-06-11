@@ -89,8 +89,6 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     `parse_warnings` TEXT DEFAULT NULL COMMENT '解析告警JSON',
     `job_name` VARCHAR(128) DEFAULT NULL COMMENT '业务作业名称',
     `module_name` VARCHAR(128) DEFAULT NULL COMMENT '模块名称',
-    `program_name` VARCHAR(255) NOT NULL COMMENT '兼容展示字段，固定等于 content_program_name',
-    `config_name` VARCHAR(255) NOT NULL COMMENT '兼容展示字段，固定等于 file_name',
     `java_path` VARCHAR(500) DEFAULT NULL COMMENT 'Java可执行文件绝对路径',
     `active_profile` VARCHAR(64) DEFAULT NULL COMMENT 'Spring profile环境',
     `port` INT DEFAULT NULL COMMENT '服务监听端口',
@@ -122,11 +120,39 @@ CREATE TABLE IF NOT EXISTS `sys_supervisor_service` (
     `update_by` VARCHAR(50) DEFAULT NULL COMMENT '更新人名称',
     `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
     UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`),
-    KEY `idx_supervisor_host_program` (`host_ip`, `program_name`),
+    KEY `idx_supervisor_host_program` (`host_ip`, `content_program_name`),
     KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`),
     KEY `idx_supervisor_host_archived` (`host_ip`, `is_archived`),
     KEY `idx_supervisor_host_status` (`host_ip`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Supervisor服务主数据表';
+
+CREATE TABLE IF NOT EXISTS `sys_supervisor_import_staging` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY COMMENT 'ID',
+    `batch_id` VARCHAR(36) NOT NULL COMMENT '预检批次唯一标识(UUID)',
+    `host_ip` VARCHAR(64) NOT NULL COMMENT '目标主机IP',
+    `operator_id` BIGINT NOT NULL COMMENT '操作人ID',
+    `operator_name` VARCHAR(50) NOT NULL COMMENT '操作人名称',
+    `config_path` VARCHAR(500) NOT NULL COMMENT '相对 /etc/supervisord.d 的配置路径',
+    `file_name` VARCHAR(255) NOT NULL COMMENT '配置文件 basename',
+    `content_program_name` VARCHAR(255) DEFAULT NULL COMMENT '配置内容中的 program_name',
+    `baseline_content` MEDIUMTEXT DEFAULT NULL COMMENT '配置原文快照',
+    `metadata_complete` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '结构化字段是否完整',
+    `parse_warnings` TEXT DEFAULT NULL COMMENT '解析告警JSON',
+    `job_name` VARCHAR(128) DEFAULT NULL COMMENT '业务作业名称',
+    `module_name` VARCHAR(128) DEFAULT NULL COMMENT '模块名称',
+    `java_path` VARCHAR(500) DEFAULT NULL COMMENT 'Java可执行文件绝对路径',
+    `active_profile` VARCHAR(64) DEFAULT NULL COMMENT 'Spring profile环境',
+    `port` INT DEFAULT NULL COMMENT '服务监听端口',
+    `jar_name` VARCHAR(255) DEFAULT NULL COMMENT 'Jar包文件名',
+    `xms` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xms 参数',
+    `xmx` VARCHAR(32) DEFAULT NULL COMMENT 'JVM Xmx 参数',
+    `run_user` VARCHAR(64) DEFAULT NULL COMMENT 'Supervisor运行用户',
+    `result` VARCHAR(16) NOT NULL COMMENT '预检结果：PLANNED/SKIPPED',
+    `message` VARCHAR(500) DEFAULT NULL COMMENT '预检消息或跳过原因',
+    `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '新增时间',
+    KEY `idx_staging_batch_id` (`batch_id`),
+    KEY `idx_staging_host_ip` (`host_ip`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Supervisor导入预检暂存表';
 
 INSERT INTO `sys_user`(
     `id`, `tenant_id`, `user_name`, `nick_name`, `password`, `status`, `is_super_admin`,

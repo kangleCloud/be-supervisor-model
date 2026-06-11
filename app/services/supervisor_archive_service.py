@@ -52,8 +52,8 @@ class SupervisorArchiveService:
         if record.is_archived:
             raise ArchiveStateError("服务已归档，无需重复归档")
 
-        LOGGER.info("归档服务：目标主机=%s，服务名称=%s", host, record.program_name)
-        stop_result = self.supervisor_service.stop(host, record.program_name, allow_not_running=True)
+        LOGGER.info("归档服务：目标主机=%s，服务名称=%s", host, record.content_program_name)
+        stop_result = self.supervisor_service.stop(host, record.content_program_name, allow_not_running=True)
         backup_result = self.config_file_service.backup_config_by_config_path(host, record.config_path)
         delete_result = self.config_file_service.delete_config_by_config_path(host, record.config_path)
         reread_result = self.supervisor_service.reread(host)
@@ -61,16 +61,16 @@ class SupervisorArchiveService:
 
         archived_at = datetime.now()
         self.registry_service.mark_archived(
-            host,
-            record.program_name,
+            host=host,
+            content_program_name=record.content_program_name,
             operator_id=operator_id,
             operator_name=operator_name,
             archived_at=archived_at,
         )
-        LOGGER.info("归档服务成功：目标主机=%s，服务名称=%s", host, record.program_name)
+        LOGGER.info("归档服务成功：目标主机=%s，服务名称=%s", host, record.content_program_name)
         return ArchiveActionResponse(
             host=host,
-            programName=record.program_name,
+            contentProgramName=record.content_program_name,
             isArchived=True,
             archivedAt=archived_at.strftime("%Y-%m-%d %H:%M:%S"),
             restoredAt=_format_datetime_text(record.restored_at),
@@ -99,27 +99,25 @@ class SupervisorArchiveService:
         if not record.is_archived:
             raise ArchiveStateError("服务未归档，无需还原")
 
-        LOGGER.info("还原服务：目标主机=%s，服务名称=%s", host, record.program_name)
+        LOGGER.info("还原服务：目标主机=%s，服务名称=%s", host, record.content_program_name)
         restore_result = self.config_file_service.restore_config_by_config_path(host, record.config_path)
         reread_result = self.supervisor_service.reread(host)
         update_result = self.supervisor_service.update(host)
-        status, pid, uptime = self._query_runtime_snapshot(host, record.program_name)
+        status, pid, uptime = self._query_runtime_snapshot(host, record.content_program_name)
 
         restored_at = datetime.now()
         self.registry_service.mark_restored(
-            host,
-            record.program_name,
-            operator_id=operator_id,
-            operator_name=operator_name,
+            host=host,
+            content_program_name=record.content_program_name,
             restored_at=restored_at,
             status=status,
             pid=pid,
             uptime=uptime,
         )
-        LOGGER.info("还原服务成功：目标主机=%s，服务名称=%s，状态=%s", host, record.program_name, status)
+        LOGGER.info("还原服务成功：目标主机=%s，服务名称=%s，状态=%s", host, record.content_program_name, status)
         return ArchiveActionResponse(
             host=host,
-            programName=record.program_name,
+            contentProgramName=record.content_program_name,
             isArchived=False,
             archivedAt=_format_datetime_text(record.archived_at),
             restoredAt=restored_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -135,7 +133,7 @@ class SupervisorArchiveService:
 
     def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
         self.host_service.get_host(host)
-        return self.registry_service.get_by_program_name(host, program_name)
+        return self.registry_service.get_by_content_program_name(host, program_name)
 
     def _query_runtime_snapshot(self, host: str, program_name: str) -> tuple[str, str | None, str | None]:
         # 还原后只同步现场状态，不自动执行 start，查不到就回写 UNKNOWN。

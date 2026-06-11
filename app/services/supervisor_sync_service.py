@@ -43,7 +43,7 @@ class SupervisorSyncService:
         sync_status = "SUCCESS"
         sync_error: str | None = None
 
-        LOGGER.info("同步服务详情：目标主机=%s，服务名称=%s", host, record.program_name)
+        LOGGER.info("同步服务详情：目标主机=%s，服务名称=%s", host, record.content_program_name)
 
         status, pid, uptime, status_loaded, status_error = self._resolve_status(
             host,
@@ -54,7 +54,7 @@ class SupervisorSyncService:
         synced_fields.extend(["status", "pid", "uptime", "statusSyncTime"])
         if not status_loaded:
             sync_status = "FAILED"
-            sync_error = status_error or f"未读取到服务状态条目: {record.program_name}"
+            sync_error = status_error or f"未读取到服务状态条目: {record.content_program_name}"
 
         current_config, current_parsed, config_state, config_error = self._read_current_config(
             host,
@@ -106,7 +106,7 @@ class SupervisorSyncService:
 
         self.registry_service.update_detail_sync_snapshot(
             host,
-            record.program_name,
+            record.content_program_name,
             sync_time=sync_time,
             status=status,
             pid=pid,
@@ -137,13 +137,13 @@ class SupervisorSyncService:
         LOGGER.info(
             "同步服务详情完成：目标主机=%s，服务名称=%s，同步状态=%s，运行状态=%s",
             host,
-            record.program_name,
+            record.content_program_name,
             sync_status,
             status,
         )
         return ServiceSyncResponse(
             host=host,
-            programName=record.program_name,
+            contentProgramName=record.content_program_name,
             status=status,
             pid=pid,
             uptime=uptime,
@@ -157,9 +157,9 @@ class SupervisorSyncService:
 
     def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
         self.host_service.get_host(host)
-        record = self.registry_service.get_by_program_name(host, program_name)
+        record = self.registry_service.get_by_content_program_name(host, program_name)
         if record.is_archived:
-            LOGGER.warning("服务已归档，禁止同步详情：目标主机=%s，服务名称=%s", host, record.program_name)
+            LOGGER.warning("服务已归档，禁止同步详情：目标主机=%s，服务名称=%s", host, record.content_program_name)
             raise ArchivedServiceSyncError()
         return record
 
@@ -172,7 +172,7 @@ class SupervisorSyncService:
         warnings: list[str],
     ) -> tuple[str, str | None, str | None, bool, str | None]:
         try:
-            statuses, command_result = self.supervisor_service.status_with_result(host, record.program_name)
+            statuses, command_result = self.supervisor_service.status_with_result(host, record.content_program_name)
         except AppError as exc:
             command_results["status"] = {"ok": False, "error": exc.msg, "data": exc.data}
             warnings.append(f"读取 Supervisor 状态失败: {exc.msg}")
@@ -180,8 +180,8 @@ class SupervisorSyncService:
 
         command_results["status"] = {"ok": True, "result": command_result}
         if not statuses:
-            warnings.append(f"未读取到服务状态条目: {record.program_name}")
-            return "UNKNOWN", None, None, False, f"未读取到服务状态条目: {record.program_name}"
+            warnings.append(f"未读取到服务状态条目: {record.content_program_name}")
+            return "UNKNOWN", None, None, False, f"未读取到服务状态条目: {record.content_program_name}"
         entry = statuses[0]
         return entry.state, entry.pid, entry.uptime, True, None
 

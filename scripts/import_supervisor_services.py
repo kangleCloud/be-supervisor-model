@@ -20,7 +20,7 @@ from app.services.supervisor_import_service import (
     SupervisorImportService,
     build_import_registry_data,
 )
-from app.services.supervisor_registry_service import SupervisorRegistryService
+from app.services.supervisor_registry_service import ImportStagingService, SupervisorRegistryService
 from app.services.template_service import TemplateService
 
 
@@ -39,10 +39,17 @@ def main() -> int:
     template_service = TemplateService(settings)
     config_file_service = ConfigFileService(settings, host_service, template_service)
     registry_service = SupervisorRegistryService(settings)
-    import_service = SupervisorImportService(host_service, config_file_service, template_service, registry_service)
+    staging_service = ImportStagingService(settings)
+    import_service = SupervisorImportService(
+        host_service,
+        config_file_service,
+        template_service,
+        registry_service,
+        staging_service,
+    )
 
-    if args.apply:
-        initialize_database(settings)
+    # 预检会写暂存表，因此脚本无论是否 --apply 都必须先确保基线表已初始化。
+    initialize_database(settings)
 
     target_hosts = list(iter_target_hosts(settings.hosts, args.host))
     if not target_hosts:
@@ -55,9 +62,9 @@ def main() -> int:
     for host in target_hosts:
         print(f"== 处理主机 {host.ip} ({host.name}) ==")
         try:
-            report = import_service.execute(
+            precheck_report = import_service.execute(
                 host=host.ip,
-                mode=mode,
+                mode=IMPORT_MODE_DRY_RUN,
                 operator_id=0,
                 operator_name="system",
                 recursive=args.recursive,
@@ -65,11 +72,28 @@ def main() -> int:
         except AppError as exc:
             print(f"导入失败: {exc}")
             continue
-        _print_report(report)
-        summary["planned"] += report.summary.planned
-        summary["imported"] += report.summary.imported
-        summary["updated"] += report.summary.updated
-        summary["skipped"] += report.summary.skipped
+        _print_report(precheck_report)
+        summary["planned"] += precheck_report.summary.planned
+        summary["skipped"] += precheck_report.summary.skipped
+
+        if not args.apply:
+            continue
+
+        try:
+            commit_report = import_service.execute(
+                host=host.ip,
+                mode=IMPORT_MODE_APPLY,
+                operator_id=0,
+                operator_name="system",
+                batch_id=precheck_report.batch_id,
+                recursive=args.recursive,
+            )
+        except AppError as exc:
+            print(f"提交失败: {exc}")
+            continue
+        _print_report(commit_report)
+        summary["imported"] += commit_report.summary.imported
+        summary["updated"] += commit_report.summary.updated
 
     print(
         "导入完成: "

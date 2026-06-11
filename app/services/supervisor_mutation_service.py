@@ -78,7 +78,7 @@ class SupervisorMutationService:
             metadata_complete=True,
             parse_warnings=(),
         )
-        self.registry_service.ensure_can_save(registry_data)
+        self.registry_service.ensure_can_create(registry_data)
         self.config_file_service.ensure_not_exists(payload.host, target.file_name, target.rendered.program_name)
         self.port_check_service.ensure_no_conflict(payload.host, payload.port)
 
@@ -106,8 +106,6 @@ class SupervisorMutationService:
             "host": record.host_ip,
             "jobName": record.job_name,
             "moduleName": record.module_name,
-            "programName": record.program_name,
-            "configName": record.config_name,
             "configPath": record.config_path,
             "fileName": record.file_name,
             "contentProgramName": record.content_program_name,
@@ -141,7 +139,7 @@ class SupervisorMutationService:
     ) -> dict[str, object]:
         """修改 Supervisor 服务，支持改名和改端口。"""
         self.host_service.get_host(host)
-        current_record = self.registry_service.get_by_program_name(host, previous_program_name)
+        current_record = self.registry_service.get_by_content_program_name(host, previous_program_name)
         self._ensure_not_archived(current_record, "服务已归档，不能修改")
         current_content = self.config_file_service.read_raw_config_by_config_path(host, current_record.config_path)
         target = self._render_target(payload, base_config_path=current_record.config_path)
@@ -162,18 +160,19 @@ class SupervisorMutationService:
             metadata_complete=True,
             parse_warnings=(),
         )
+        # 修改时允许保留自身记录，因此数据库冲突校验必须排除当前主键。
         self.registry_service.ensure_can_save(registry_data, exclude_record_id=current_record.id)
         self._ensure_target_path_available(host, current_record, target.config_path)
         self._ensure_port_available(host, current_record, payload.port)
 
         identity_changed = (
-            target.rendered.program_name != current_record.program_name
+            target.rendered.program_name != current_record.content_program_name
             or target.config_path != current_record.config_path
         )
         LOGGER.info(
             "修改服务：目标主机=%s，原服务名称=%s，新服务名称=%s，原配置路径=%s，新配置路径=%s",
             host,
-            current_record.program_name,
+            current_record.content_program_name,
             target.rendered.program_name,
             current_record.config_path,
             target.config_path,
@@ -181,7 +180,7 @@ class SupervisorMutationService:
 
         command_results: dict[str, object] = {}
         if identity_changed:
-            command_results["stop"] = self.supervisor_service.stop(host, current_record.program_name, allow_not_running=True)
+            command_results["stop"] = self.supervisor_service.stop(host, current_record.content_program_name, allow_not_running=True)
         backup_result = self.config_file_service.backup_config_by_config_path(host, current_record.config_path)
         command_results["backup"] = backup_result
         write_result = self.config_file_service.write_config_by_config_path(host, target.config_path, target.rendered.content)
@@ -193,6 +192,7 @@ class SupervisorMutationService:
         command_results["reread"] = reread_result
         command_results["update"] = update_result
         status, pid, uptime = self._query_runtime_snapshot(host, target.rendered.program_name)
+        parsed_target = self.template_service.parse(target.rendered.content)
 
         try:
             self.registry_service.update_service(
@@ -204,9 +204,9 @@ class SupervisorMutationService:
                 status=status,
                 pid=pid,
                 uptime=uptime,
-                command=self.template_service.parse(target.rendered.content).options.get("command"),
-                directory=self.template_service.parse(target.rendered.content).options.get("directory"),
-                stdout_logfile=self.template_service.parse(target.rendered.content).options.get("stdout_logfile"),
+                command=parsed_target.options.get("command"),
+                directory=parsed_target.options.get("directory"),
+                stdout_logfile=parsed_target.options.get("stdout_logfile"),
                 has_backup=True,
                 config_content=target.rendered.content,
                 backup_config_content=current_content.content,
@@ -224,18 +224,18 @@ class SupervisorMutationService:
             LOGGER.exception(
                 "修改服务写库失败：目标主机=%s，原服务名称=%s，新服务名称=%s",
                 host,
-                current_record.program_name,
+                current_record.content_program_name,
                 target.rendered.program_name,
                 exc_info=exc,
             )
             raise InternalError("修改服务写库失败", rollback_result) from exc
 
-        updated_record = self.registry_service.get_by_program_name(host, target.rendered.program_name)
+        updated_record = self.registry_service.get_by_content_program_name(host, target.rendered.program_name)
         return ServiceUpdateResponse(
             host=host,
-            previousProgramName=current_record.program_name,
-            programName=updated_record.program_name,
-            configName=updated_record.config_name,
+            previousContentProgramName=current_record.content_program_name,
+            contentProgramName=updated_record.content_program_name,
+            fileName=updated_record.file_name,
             configPath=updated_record.config_path,
             manageMode=updated_record.manage_mode,
             commandResults=command_results,
@@ -245,12 +245,12 @@ class SupervisorMutationService:
         """删除 Supervisor 服务，必须先停止再删现场和数据库。"""
         del current_user
         self.host_service.get_host(host)
-        record = self.registry_service.get_by_program_name(host, program_name)
+        record = self.registry_service.get_by_content_program_name(host, program_name)
         self._ensure_not_archived(record, "服务已归档，不能删除")
 
-        LOGGER.info("删除服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.program_name, record.config_path)
+        LOGGER.info("删除服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.content_program_name, record.config_path)
         command_results: dict[str, object] = {
-            "stop": self.supervisor_service.stop(host, record.program_name, allow_not_running=True),
+            "stop": self.supervisor_service.stop(host, record.content_program_name, allow_not_running=True),
         }
 
         existed = self.config_file_service.exists_by_config_path(host, record.config_path)
@@ -276,12 +276,12 @@ class SupervisorMutationService:
             rollback_result = self._rollback_delete(host, record.config_path, existed)
             if isinstance(exc, AppError):
                 raise
-            LOGGER.exception("删除服务写库失败：目标主机=%s，服务名称=%s", host, record.program_name, exc_info=exc)
+            LOGGER.exception("删除服务写库失败：目标主机=%s，服务名称=%s", host, record.content_program_name, exc_info=exc)
             raise InternalError("删除服务写库失败", rollback_result) from exc
 
         return ServiceDeleteResponse(
             host=host,
-            programName=record.program_name,
+            contentProgramName=record.content_program_name,
             deletedConfigPath=record.config_path,
             backupPath=backup_path,
             commandResults=command_results,
@@ -300,7 +300,7 @@ class SupervisorMutationService:
             active=payload.active,
             port=payload.port,
             jar_name=payload.jar_name,
-            config_name=payload.config_name,
+            config_name=payload.file_name,
             xms=payload.xms,
             xmx=payload.xmx,
             user=payload.user,
@@ -335,8 +335,6 @@ class SupervisorMutationService:
             host_ip=host,
             job_name=job_name,
             module_name=module_name,
-            program_name=target.rendered.program_name,
-            config_name=target.rendered.config_name,
             config_path=target.config_path,
             file_name=target.file_name,
             content_program_name=target.rendered.program_name,
