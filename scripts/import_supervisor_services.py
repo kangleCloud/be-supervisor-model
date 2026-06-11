@@ -10,8 +10,8 @@ from app.core.database import initialize_database
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
 from app.services.supervisor_import_service import (
-    IMPORT_MODE_APPLY,
-    IMPORT_MODE_DRY_RUN,
+    IMPORT_MODE_COMMIT,
+    IMPORT_MODE_PRECHECK,
     IMPORT_RESULT_IMPORTED,
     IMPORT_RESULT_PLANNED,
     IMPORT_RESULT_SKIPPED,
@@ -57,14 +57,14 @@ def main() -> int:
         return 1
 
     summary = {"planned": 0, "imported": 0, "updated": 0, "skipped": 0}
-    mode = IMPORT_MODE_APPLY if args.apply else IMPORT_MODE_DRY_RUN
+    mode = IMPORT_MODE_COMMIT if args.apply else IMPORT_MODE_PRECHECK
     print(f"== 导入模式 {mode}，recursive={args.recursive} ==")
     for host in target_hosts:
         print(f"== 处理主机 {host.ip} ({host.name}) ==")
         try:
             precheck_report = import_service.execute(
                 host=host.ip,
-                mode=IMPORT_MODE_DRY_RUN,
+                mode=IMPORT_MODE_PRECHECK,
                 operator_id=0,
                 operator_name="system",
                 recursive=args.recursive,
@@ -82,7 +82,7 @@ def main() -> int:
         try:
             commit_report = import_service.execute(
                 host=host.ip,
-                mode=IMPORT_MODE_APPLY,
+                mode=IMPORT_MODE_COMMIT,
                 operator_id=0,
                 operator_name="system",
                 batch_id=precheck_report.batch_id,

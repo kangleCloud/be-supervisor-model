@@ -174,14 +174,25 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
   -H 'Content-Type: application/json' \
   -d '{
     "host": "10.1.0.104",
-    "mode": "DRY_RUN"
+    "mode": "PRECHECK"
+  }'
+
+curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
+  -H 'Authorization: Bearer <access-token>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "host": "10.1.0.104",
+    "mode": "COMMIT",
+    "batchId": "<上一次 PRECHECK 返回的 batchId>"
   }'
 ```
 
 接口规则：
 
-- `mode=DRY_RUN`：只返回逐文件预检结果，不写 `sys_supervisor_service`
-- `mode=APPLY`：同步执行正式导入，返回 `IMPORTED/UPDATED/SKIPPED` 明细
+- `mode=PRECHECK`：写入暂存表并返回 `batchId + summary + items`，不写 `sys_supervisor_service`
+- `mode=COMMIT`：必须携带上一次 `PRECHECK` 返回的 `batchId`，整批原子写入正式表
+- `PRECHECK` 禁止携带 `batchId`，`COMMIT` 缺少 `batchId` 会直接返回 `400`
+- `PRECHECK` 结果中只要存在任意 `SKIPPED`，后端 `COMMIT` 就会返回 `409`
 - 固定递归扫描 `/etc/supervisord.d` 下全部 `*.ini`
 - 固定排除 `.ini.bak` 和 `.ini.bak.*`
 - 响应 `summary` 固定包含 `planned/imported/updated/skipped`

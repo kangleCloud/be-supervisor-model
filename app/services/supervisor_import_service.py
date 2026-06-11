@@ -20,9 +20,9 @@ from app.services.supervisor_registry_service import (
 from app.services.template_service import TemplateService
 
 
-IMPORT_MODE_DRY_RUN = "PRECHECK"
-IMPORT_MODE_APPLY = "COMMIT"
-ALLOWED_IMPORT_MODES = {IMPORT_MODE_DRY_RUN, IMPORT_MODE_APPLY}
+IMPORT_MODE_PRECHECK = "PRECHECK"
+IMPORT_MODE_COMMIT = "COMMIT"
+ALLOWED_IMPORT_MODES = {IMPORT_MODE_PRECHECK, IMPORT_MODE_COMMIT}
 
 IMPORT_RESULT_PLANNED = "PLANNED"
 IMPORT_RESULT_IMPORTED = "IMPORTED"
@@ -207,7 +207,7 @@ class SupervisorImportService:
         recursive: bool = True,
     ) -> SupervisorImportReport:
         normalized_mode = self._normalize_mode(mode)
-        if normalized_mode == IMPORT_MODE_DRY_RUN:
+        if normalized_mode == IMPORT_MODE_PRECHECK:
             return self._execute_precheck(
                 host=host,
                 operator_id=operator_id,
@@ -274,12 +274,12 @@ class SupervisorImportService:
         elapsed = time.time() - overall_start
         print(
             f"[SUPERVISOR_IMPORT_DEBUG] 导入汇总: "
-            f"host={safe_host}, mode={IMPORT_MODE_DRY_RUN}, batchId={batch_id}, "
+            f"host={safe_host}, mode={IMPORT_MODE_PRECHECK}, batchId={batch_id}, "
             f"total={total}, planned={summary.planned}, skipped={summary.skipped}, elapsed={elapsed:.3f}s"
         )
         return SupervisorImportReport(
             host=safe_host,
-            mode=IMPORT_MODE_DRY_RUN,
+            mode=IMPORT_MODE_PRECHECK,
             batch_id=batch_id,
             summary=summary,
             items=result_items,
@@ -309,7 +309,7 @@ class SupervisorImportService:
             self._build_item_from_record(
                 record,
                 result=IMPORT_RESULT_IMPORTED if created else IMPORT_RESULT_UPDATED,
-                message=self._build_apply_message(existing_by_path, created),
+                message=self._build_commit_message(existing_by_path, created),
             )
             for record, created, existing_by_path in commit_results
         )
@@ -321,7 +321,7 @@ class SupervisorImportService:
         )
         return SupervisorImportReport(
             host=safe_host,
-            mode=IMPORT_MODE_APPLY,
+            mode=IMPORT_MODE_COMMIT,
             batch_id=batch_id,
             summary=summary,
             items=items,
@@ -398,7 +398,11 @@ class SupervisorImportService:
             parse_start = time.time()
             data = build_import_registry_data(self.template_service, host, raw_config)
             parse_elapsed = time.time() - parse_start
-            print(f"{prefix} parse_done programName={data.content_program_name} metadataComplete={data.metadata_complete} warnings={len(data.parse_warnings)} elapsed={parse_elapsed:.3f}s")
+            print(
+                f"{prefix} parse_done contentProgramName={data.content_program_name} "
+                f"metadataComplete={data.metadata_complete} warnings={len(data.parse_warnings)} "
+                f"elapsed={parse_elapsed:.3f}s"
+            )
         except AppError as exc:
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
             return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
@@ -427,7 +431,7 @@ class SupervisorImportService:
         item = self._build_item_from_data(
             normalized,
             result=IMPORT_RESULT_PLANNED,
-            message=self._build_dry_run_message(existing_by_path),
+            message=self._build_precheck_message(existing_by_path),
         )
         return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_data(
             normalized,
@@ -443,7 +447,7 @@ class SupervisorImportService:
         return normalized
 
     @staticmethod
-    def _build_dry_run_message(existing_by_path: SupervisorRegistryRecord | None) -> str:
+    def _build_precheck_message(existing_by_path: SupervisorRegistryRecord | None) -> str:
         if existing_by_path is None:
             return "预检通过，正式导入时将新增记录"
         if existing_by_path.manage_mode == MANAGE_MODE_TEMPLATE_MANAGED:
@@ -451,7 +455,7 @@ class SupervisorImportService:
         return "预检通过，正式导入时将更新已有导入快照"
 
     @staticmethod
-    def _build_apply_message(existing_by_path: SupervisorRegistryRecord | None, created: bool) -> str:
+    def _build_commit_message(existing_by_path: SupervisorRegistryRecord | None, created: bool) -> str:
         if created or existing_by_path is None:
             return "导入成功"
         if existing_by_path.manage_mode == MANAGE_MODE_TEMPLATE_MANAGED:

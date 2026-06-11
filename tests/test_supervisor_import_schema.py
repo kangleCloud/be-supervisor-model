@@ -7,16 +7,35 @@ from pydantic import ValidationError
 from app.schemas.supervisor import SupervisorImportRequest
 
 
+def test_import_request_accepts_precheck_without_batch_id():
+    payload = SupervisorImportRequest(host="127.0.0.1", mode="PRECHECK")
+
+    assert payload.host == "127.0.0.1"
+    assert payload.mode == "PRECHECK"
+    assert payload.batch_id is None
+
+
+def test_import_request_rejects_precheck_with_batch_id():
+    with pytest.raises(ValidationError):
+        SupervisorImportRequest(host="127.0.0.1", mode="PRECHECK", batchId="demo-batch")
+
+
+def test_import_request_rejects_commit_without_batch_id():
+    with pytest.raises(ValidationError):
+        SupervisorImportRequest(host="127.0.0.1", mode="COMMIT")
+
+
 def test_import_request_rejects_empty_host():
     with pytest.raises(ValidationError):
-        SupervisorImportRequest(host="", mode="DRY_RUN")
+        SupervisorImportRequest(host="", mode="PRECHECK")
 
 
 def test_import_request_rejects_invalid_host():
     with pytest.raises(ValidationError):
-        SupervisorImportRequest(host="../bad-host", mode="DRY_RUN")
+        SupervisorImportRequest(host="../bad-host", mode="PRECHECK")
 
 
-def test_import_request_rejects_invalid_mode():
+@pytest.mark.parametrize("invalid_mode", ["DRY_RUN", "APPLY", "PREVIEW"])
+def test_import_request_rejects_invalid_mode(invalid_mode: str):
     with pytest.raises(ValidationError):
-        SupervisorImportRequest(host="127.0.0.1", mode="PREVIEW")
+        SupervisorImportRequest(host="127.0.0.1", mode=invalid_mode)

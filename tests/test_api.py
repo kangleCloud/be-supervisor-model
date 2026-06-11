@@ -877,8 +877,8 @@ def test_api_success_response_keeps_cors_headers(client, seed_user):
     _assert_cors_headers(response)
 
 
-def test_api_import_dry_run_prints_hostname_and_file_paths(client, test_environment, seed_user, capsys):
-    """验证 DRY_RUN 在服务端 stdout 输出 hostname 探测结果和逐文件诊断。"""
+def test_api_import_precheck_prints_hostname_and_file_paths(client, test_environment, seed_user, capsys):
+    """验证 PRECHECK 在服务端 stdout 输出 hostname 探测结果和逐文件诊断。"""
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
@@ -1060,6 +1060,22 @@ def test_api_import_skips_parse_error_and_continues(client, test_environment, se
     assert "导入汇总" in captured
     assert "planned=1" in captured
     assert "skipped=1" in captured
+
+
+def test_api_import_rejects_legacy_dry_run_mode(client, seed_user):
+    """验证旧协议 DRY_RUN 会被请求模型直接拒绝。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json={"host": "10.1.0.99", "mode": "DRY_RUN"},
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40000
+    assert response.json()["msg"] == "请求参数非法"
 
 
 def test_api_list_pagination_defaults(client, test_environment, seed_user, fake_mysql):
