@@ -261,3 +261,4 @@ settings.local.*
 # AI generated files
 # =========================================================
 pipeline
+.claude/
