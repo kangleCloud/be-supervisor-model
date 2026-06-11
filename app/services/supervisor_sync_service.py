@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ArchivedServiceSyncError, ParamError
 from app.schemas.supervisor import ServiceSyncResponse
 from app.services.config_file_service import ConfigFileService, RawConfig
@@ -33,9 +34,9 @@ class SupervisorSyncService:
         self.supervisor_service = supervisor_service
         self.template_service = template_service
 
-    def sync_service(self, host: str, program_name: str) -> dict[str, object]:
+    async def sync_service(self, host: str, program_name: str) -> dict[str, object]:
         """读取远端状态与配置，并把结果回写数据库详情快照。"""
-        record = self._load_record(host, program_name)
+        record = await self._load_record(host, program_name)
         sync_time = datetime.now()
         warnings: list[str] = []
         synced_fields: list[str] = []
@@ -45,7 +46,7 @@ class SupervisorSyncService:
 
         LOGGER.info("同步服务详情：目标主机=%s，服务名称=%s", host, record.content_program_name)
 
-        status, pid, uptime, status_loaded, status_error = self._resolve_status(
+        status, pid, uptime, status_loaded, status_error = await self._resolve_status(
             host,
             record,
             command_results=command_results,
@@ -56,7 +57,7 @@ class SupervisorSyncService:
             sync_status = "FAILED"
             sync_error = status_error or f"未读取到服务状态条目: {record.content_program_name}"
 
-        current_config, current_parsed, config_state, config_error = self._read_current_config(
+        current_config, current_parsed, config_state, config_error = await self._read_current_config(
             host,
             record,
             command_results=command_results,
@@ -68,7 +69,7 @@ class SupervisorSyncService:
         if current_config is not None:
             synced_fields.append("configContent")
 
-        backup_config, backup_state, backup_error = self._read_backup_config(
+        backup_config, backup_state, backup_error = await self._read_backup_config(
             host,
             record,
             command_results=command_results,
@@ -104,7 +105,7 @@ class SupervisorSyncService:
         if config_state == "MISSING":
             merged["config_content"] = None
 
-        self.registry_service.update_detail_sync_snapshot(
+        await self.registry_service.update_detail_sync_snapshot(
             host,
             record.content_program_name,
             sync_time=sync_time,
@@ -155,15 +156,15 @@ class SupervisorSyncService:
             commandResults=command_results,
         ).model_dump(by_alias=True)
 
-    def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
-        self.host_service.get_host(host)
-        record = self.registry_service.get_by_content_program_name(host, program_name)
+    async def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
+        await run_blocking(self.host_service.get_host, host)
+        record = await self.registry_service.get_by_content_program_name(host, program_name)
         if record.is_archived:
             LOGGER.warning("服务已归档，禁止同步详情：目标主机=%s，服务名称=%s", host, record.content_program_name)
             raise ArchivedServiceSyncError()
         return record
 
-    def _resolve_status(
+    async def _resolve_status(
         self,
         host: str,
         record: SupervisorRegistryRecord,
@@ -172,7 +173,7 @@ class SupervisorSyncService:
         warnings: list[str],
     ) -> tuple[str, str | None, str | None, bool, str | None]:
         try:
-            statuses, command_result = self.supervisor_service.status_with_result(host, record.content_program_name)
+            statuses, command_result = await run_blocking(self.supervisor_service.status_with_result, host, record.content_program_name)
         except AppError as exc:
             command_results["status"] = {"ok": False, "error": exc.msg, "data": exc.data}
             warnings.append(f"读取 Supervisor 状态失败: {exc.msg}")
@@ -185,7 +186,7 @@ class SupervisorSyncService:
         entry = statuses[0]
         return entry.state, entry.pid, entry.uptime, True, None
 
-    def _read_current_config(
+    async def _read_current_config(
         self,
         host: str,
         record: SupervisorRegistryRecord,
@@ -194,7 +195,11 @@ class SupervisorSyncService:
         warnings: list[str],
     ) -> tuple[RawConfig | None, ParsedConfig | None, str, str | None]:
         try:
-            raw_config = self.config_file_service.read_raw_config_optional_by_config_path(host, record.config_path)
+            raw_config = await run_blocking(
+                self.config_file_service.read_raw_config_optional_by_config_path,
+                host,
+                record.config_path,
+            )
         except AppError as exc:
             command_results["config"] = {
                 "configPath": record.config_path,
@@ -210,13 +215,13 @@ class SupervisorSyncService:
             warnings.append(f"当前配置文件不存在: {record.config_path}")
             return None, None, "MISSING", f"当前配置文件不存在: {record.config_path}"
         try:
-            parsed = self.template_service.parse(raw_config.content)
+            parsed = await run_blocking(self.template_service.parse, raw_config.content)
         except ParamError as exc:
             warnings.append(exc.msg)
             return raw_config, None, "OK", None
         return raw_config, parsed, "OK", None
 
-    def _read_backup_config(
+    async def _read_backup_config(
         self,
         host: str,
         record: SupervisorRegistryRecord,
@@ -226,7 +231,8 @@ class SupervisorSyncService:
     ) -> tuple[RawConfig | None, str, str | None]:
         backup_path = f"{record.config_path}.bak"
         try:
-            raw_backup = self.config_file_service.read_raw_config_optional_by_config_path(
+            raw_backup = await run_blocking(
+                self.config_file_service.read_raw_config_optional_by_config_path,
                 host,
                 backup_path,
                 allow_backups=True,
@@ -269,7 +275,6 @@ class SupervisorSyncService:
 
         options = parsed.options
         return {
-            # 同步失败时保留旧值，同步成功时以当前远端配置反解结果更新数据库快照。
             "command": self._prefer_new_text(options.get("command"), record.command),
             "directory": self._prefer_new_text(options.get("directory"), record.directory),
             "stdout_logfile": self._prefer_new_text(options.get("stdout_logfile"), record.stdout_logfile),

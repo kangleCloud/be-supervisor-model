@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.core.config import Settings
-from app.core.database import get_connection
+from app.database.repositories.auth import TokenRepository
 
 
 @dataclass(frozen=True)
@@ -26,8 +26,9 @@ class TokenService:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.repository = TokenRepository()
 
-    def create_token(
+    async def create_token(
         self,
         user_id: int,
         user_name: str,
@@ -40,81 +41,34 @@ class TokenService:
     ) -> int:
         """写入有效登录令牌。"""
         token_digest = self.build_token_digest(token)
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO sys_login_token(
-                        user_id, user_name, token_jti, token_digest, login_ip, user_agent,
-                        issued_at, expires_at, create_by_id, create_by, update_by_id, update_by, remark
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        user_id,
-                        user_name,
-                        token_jti,
-                        token_digest,
-                        login_ip,
-                        user_agent[:500],
-                        to_db_datetime(issued_at),
-                        to_db_datetime(expires_at),
-                        user_id,
-                        user_name,
-                        user_id,
-                        user_name,
-                        "JWT登录令牌",
-                    ),
-                )
-                token_id = int(cursor.lastrowid)
-            connection.commit()
-        return token_id
+        return await self.repository.create_token(
+            user_id=user_id,
+            user_name=user_name,
+            token_jti=token_jti,
+            token_digest=token_digest,
+            login_ip=login_ip,
+            user_agent=user_agent[:500],
+            issued_at=to_db_datetime(issued_at),
+            expires_at=to_db_datetime(expires_at),
+        )
 
-    def get_active_token(self, user_id: int, token_jti: str) -> LoginTokenRecord | None:
+    async def get_active_token(self, user_id: int, token_jti: str) -> LoginTokenRecord | None:
         """按 user_id 与 jti 查询未注销令牌。"""
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, user_id, user_name, token_jti, token_digest, revoked_time
-                    FROM sys_login_token
-                    WHERE user_id = %s
-                      AND token_jti = %s
-                      AND is_deleted = 0
-                      AND revoked_time IS NULL
-                    LIMIT 1
-                    """,
-                    (user_id, token_jti),
-                )
-                row = cursor.fetchone()
+        row = await self.repository.find_active_token(user_id, token_jti)
         if row is None:
             return None
         return LoginTokenRecord(
-            id=int(row["id"]),
-            user_id=int(row["user_id"]),
-            user_name=str(row["user_name"]),
-            token_jti=str(row["token_jti"]),
-            token_digest=str(row["token_digest"]),
-            revoked_time=coerce_datetime(row.get("revoked_time")),
+            id=int(row.id),
+            user_id=int(row.user_id),
+            user_name=str(row.user_name),
+            token_jti=str(row.token_jti),
+            token_digest=str(row.token_digest),
+            revoked_time=coerce_datetime(row.revoked_time),
         )
 
-    def revoke_token(self, token_id: int, user_id: int, username: str) -> None:
+    async def revoke_token(self, token_id: int, user_id: int, username: str) -> None:
         """注销指定令牌，保证后续请求立即失效。"""
-        revoked_time = to_db_datetime(datetime.now(timezone.utc))
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE sys_login_token
-                    SET revoked_time = %s,
-                        update_time = CURRENT_TIMESTAMP,
-                        update_by_id = %s,
-                        update_by = %s,
-                        version = version + 1
-                    WHERE id = %s AND revoked_time IS NULL
-                    """,
-                    (revoked_time, user_id, username, token_id),
-                )
-            connection.commit()
+        await self.repository.revoke_token(token_id, user_id, username, to_db_datetime(datetime.now(timezone.utc)))
 
     @staticmethod
     def build_token_digest(token: str) -> str:
@@ -122,10 +76,9 @@ class TokenService:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def to_db_datetime(value: datetime) -> str:
-    """统一把 UTC 时间写成 MySQL DATETIME。"""
-    utc_value = value.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
-    return utc_value.strftime("%Y-%m-%d %H:%M:%S")
+def to_db_datetime(value: datetime) -> datetime:
+    """统一把 UTC 时间写成无时区 datetime，兼容 ORM DATETIME 字段。"""
+    return value.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
 
 
 def coerce_datetime(value: object) -> datetime | None:

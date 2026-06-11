@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -11,10 +12,10 @@ from starlette.responses import Response
 from app.api.auth import router as auth_router
 from app.api.supervisor import router as supervisor_router
 from app.core.config import get_settings
-from app.core.database import initialize_database
 from app.core.exceptions import AppError
 from app.core.logging import configure_logging
 from app.core.response import fail
+from app.database.bootstrap import close_database, init_database
 
 
 LOGGER = logging.getLogger(__name__)
@@ -41,12 +42,20 @@ def create_app() -> FastAPI:
     """创建并装配应用。"""
     settings = get_settings()
     configure_logging(settings.app.log_level)
-    initialize_database(settings)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await init_database(settings)
+        try:
+            yield
+        finally:
+            await close_database()
 
     app = FastAPI(
         title="be-supervisor-model",
         description="面向运维场景的 Supervisor 配置、登录鉴权与进程管理服务。",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     @app.middleware("http")

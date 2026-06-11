@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ConfigNotFoundError, FileOperationError, ParamError
 from app.executor.base import ExecutorRuntimeError
 from app.services.config_file_service import ConfigFileService, RawConfig
@@ -196,7 +197,7 @@ class SupervisorImportService:
         self.registry_service = registry_service
         self.staging_service = staging_service
 
-    def execute(
+    async def execute(
         self,
         *,
         host: str,
@@ -208,20 +209,20 @@ class SupervisorImportService:
     ) -> SupervisorImportReport:
         normalized_mode = self._normalize_mode(mode)
         if normalized_mode == IMPORT_MODE_PRECHECK:
-            return self._execute_precheck(
+            return await self._execute_precheck(
                 host=host,
                 operator_id=operator_id,
                 operator_name=operator_name,
                 recursive=recursive,
             )
-        return self._execute_commit(
+        return await self._execute_commit(
             host=host,
             batch_id=(batch_id or "").strip(),
             operator_id=operator_id,
             operator_name=operator_name,
         )
 
-    def _execute_precheck(
+    async def _execute_precheck(
         self,
         *,
         host: str,
@@ -231,22 +232,22 @@ class SupervisorImportService:
     ) -> SupervisorImportReport:
         """扫描远端配置，写入暂存表并返回预检明细。"""
         overall_start = time.time()
-        host_config = self.host_service.get_host(host)
+        host_config = await run_blocking(self.host_service.get_host, host)
         safe_host = host_config.ip
-        executor = self.host_service.get_executor(safe_host)
+        executor = await run_blocking(self.host_service.get_executor, safe_host)
         batch_id = self.staging_service.create_batch_id()
         _print_hostname_diagnostic(safe_host, host_config.executor_type, executor)
 
-        self.staging_service.delete_expired_batches()
-        self.staging_service.clear_operator_host_batches(host_ip=safe_host, operator_id=operator_id)
+        await self.staging_service.delete_expired_batches()
+        await self.staging_service.clear_operator_host_batches(host_ip=safe_host, operator_id=operator_id)
 
-        config_paths = self._scan_config_paths(safe_host, host_config.executor_type, recursive)
+        config_paths = await self._scan_config_paths(safe_host, host_config.executor_type, recursive)
         total = len(config_paths)
         items: list[SupervisorImportItem] = []
         staging_rows: list[dict[str, object]] = []
         batch_program_paths: dict[str, str] = {}
         for index, config_path in enumerate(config_paths, start=1):
-            item, staging_row = self._precheck_config_path(
+            item, staging_row = await self._precheck_config_path(
                 host=safe_host,
                 config_path=config_path,
                 index=index,
@@ -256,7 +257,7 @@ class SupervisorImportService:
             items.append(item)
             staging_rows.append(staging_row)
 
-        self.staging_service.insert_batch(
+        await self.staging_service.insert_batch(
             batch_id=batch_id,
             host_ip=safe_host,
             operator_id=operator_id,
@@ -285,7 +286,7 @@ class SupervisorImportService:
             items=result_items,
         )
 
-    def _execute_commit(
+    async def _execute_commit(
         self,
         *,
         host: str,
@@ -296,8 +297,8 @@ class SupervisorImportService:
         """按 batchId 把预检批次原子提交到正式表。"""
         if not batch_id:
             raise ParamError("COMMIT 模式必须传 batchId")
-        safe_host = self.host_service.get_host(host).ip
-        commit_results = self.staging_service.commit_batch(
+        safe_host = (await run_blocking(self.host_service.get_host, host)).ip
+        commit_results = await self.staging_service.commit_batch(
             batch_id=batch_id,
             host_ip=safe_host,
             operator_id=operator_id,
@@ -327,14 +328,15 @@ class SupervisorImportService:
             items=items,
         )
 
-    def _scan_config_paths(self, host: str, executor_type: str, recursive: bool) -> list[str]:
+    async def _scan_config_paths(self, host: str, executor_type: str, recursive: bool) -> list[str]:
         """统一扫描目标主机配置目录。"""
         try:
             config_paths = sorted(
                 self.config_file_service.to_relative_config_path(path)
-                for path in self.config_file_service.list_config_paths(
+                for path in await run_blocking(
+                    self.config_file_service.list_config_paths,
                     host,
-                    include_backups=False,
+                    False,
                     recursive=recursive,
                 )
             )
@@ -358,7 +360,7 @@ class SupervisorImportService:
             raise ConfigNotFoundError("远端目录下无可用配置文件")
         return config_paths
 
-    def _precheck_config_path(
+    async def _precheck_config_path(
         self,
         *,
         host: str,
@@ -377,7 +379,7 @@ class SupervisorImportService:
         # === read ===
         try:
             read_start = time.time()
-            raw_config = self.config_file_service.read_raw_config_by_config_path_direct(host, config_path)
+            raw_config = await run_blocking(self.config_file_service.read_raw_config_by_config_path_direct, host, config_path)
             read_elapsed = time.time() - read_start
             print(f"{prefix} read_done elapsed={read_elapsed:.3f}s")
         except ConfigNotFoundError as exc:
@@ -396,7 +398,7 @@ class SupervisorImportService:
         # === parse ===
         try:
             parse_start = time.time()
-            data = build_import_registry_data(self.template_service, host, raw_config)
+            data = await run_blocking(build_import_registry_data, self.template_service, host, raw_config)
             parse_elapsed = time.time() - parse_start
             print(
                 f"{prefix} parse_done contentProgramName={data.content_program_name} "
@@ -416,7 +418,7 @@ class SupervisorImportService:
             if duplicate_path is not None and duplicate_path != config_path:
                 raise ParamError(f"同一批次存在重复 contentProgramName: {data.content_program_name}")
             plan_start = time.time()
-            normalized, existing_by_path = self.registry_service.plan_import_upsert(data)
+            normalized, existing_by_path = await self.registry_service.plan_import_upsert(data)
             plan_elapsed = time.time() - plan_start
             batch_program_paths[normalized.content_program_name] = config_path
             result_so_far = IMPORT_RESULT_PLANNED

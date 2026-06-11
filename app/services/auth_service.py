@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import jwt
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings
-from app.core.database import get_connection
 from app.core.exceptions import ParamError, UnauthorizedError
 from app.core.jwt_service import create_access_token, decode_access_token
 from app.core.passwords import verify_password
+from app.database.repositories.auth import LoginLogRepository
 from app.services.token_service import TokenService, to_db_datetime
 from app.services.user_service import UserRecord, UserService
 
@@ -42,17 +44,19 @@ class AuthService:
         self.settings = settings
         self.user_service = UserService(settings)
         self.token_service = TokenService(settings)
+        self.login_log_repository = LoginLogRepository()
 
-    def login(self, username: str, password: str, client_ip: str, user_agent: str) -> dict[str, object]:
+    async def login(self, username: str, password: str, client_ip: str, user_agent: str) -> dict[str, object]:
         """校验账号密码，签发 JWT，并写入令牌与审计日志。"""
         normalized_username = (username or "").strip()
         normalized_password = (password or "").strip()
         if not normalized_username or not normalized_password:
             raise ParamError("用户名和密码不能为空")
 
-        user = self.user_service.get_by_username(normalized_username)
-        if user is None or not verify_password(normalized_password, user.password):
-            self._write_login_log(
+        user = await self.user_service.get_by_username(normalized_username)
+        password_valid = bool(user) and await run_in_threadpool(verify_password, normalized_password, user.password)
+        if user is None or not password_valid:
+            await self._write_login_log(
                 user_id=user.id if user else None,
                 token_id=None,
                 user_name=normalized_username,
@@ -65,7 +69,7 @@ class AuthService:
             raise UnauthorizedError("用户名或密码错误")
 
         if user.status != 1:
-            self._write_login_log(
+            await self._write_login_log(
                 user_id=user.id,
                 token_id=None,
                 user_name=user.user_name,
@@ -83,7 +87,7 @@ class AuthService:
             self.settings.auth.jwt_secret,
             self.settings.auth.access_token_expire_minutes,
         )
-        token_id = self.token_service.create_token(
+        token_id = await self.token_service.create_token(
             user_id=user.id,
             user_name=user.user_name,
             token=token,
@@ -93,8 +97,8 @@ class AuthService:
             issued_at=issued_at,
             expires_at=expires_at,
         )
-        self.user_service.update_login_info(user.id, user.user_name, to_db_datetime(issued_at), client_ip)
-        self._write_login_log(
+        await self.user_service.update_login_info(user.id, user.user_name, to_db_datetime(issued_at), client_ip)
+        await self._write_login_log(
             user_id=user.id,
             token_id=token_id,
             user_name=user.user_name,
@@ -111,7 +115,7 @@ class AuthService:
             "user": user.to_auth_profile(),
         }
 
-    def authenticate_access_token(self, token: str) -> AuthenticatedUser:
+    async def authenticate_access_token(self, token: str) -> AuthenticatedUser:
         """校验 JWT 与令牌表状态，并返回当前用户上下文。"""
         if not token:
             raise UnauthorizedError("缺少登录凭证")
@@ -130,24 +134,24 @@ class AuthService:
         except (KeyError, TypeError, ValueError) as exc:
             raise UnauthorizedError("登录凭证无效") from exc
 
-        token_record = self.token_service.get_active_token(user_id, token_jti)
+        token_record = await self.token_service.get_active_token(user_id, token_jti)
         if token_record is None:
             raise UnauthorizedError("登录令牌已失效")
         if token_record.token_digest != self.token_service.build_token_digest(token):
             raise UnauthorizedError("登录凭证无效")
 
-        user = self.user_service.get_by_id(user_id)
+        user = await self.user_service.get_by_id(user_id)
         if user is None:
             raise UnauthorizedError("用户不存在")
         if user.status != 1:
             raise UnauthorizedError("账号已禁用")
         return self._build_authenticated_user(user, token_record.id, username=user.user_name, token_jti=token_jti)
 
-    def logout(self, current_user: AuthenticatedUser) -> None:
+    async def logout(self, current_user: AuthenticatedUser) -> None:
         """注销当前令牌。"""
-        self.token_service.revoke_token(current_user.token_id, current_user.user_id, current_user.username)
+        await self.token_service.revoke_token(current_user.token_id, current_user.user_id, current_user.username)
 
-    def _write_login_log(
+    async def _write_login_log(
         self,
         user_id: int | None,
         token_id: int | None,
@@ -159,35 +163,18 @@ class AuthService:
         token_jti: str | None,
     ) -> None:
         browser_name, os_name = parse_user_agent(user_agent)
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    INSERT INTO sys_login_log(
-                        user_id, token_id, user_name, ipaddr, login_location, browser, os, status, msg,
-                        token_jti, login_time, create_by_id, create_by, update_by_id, update_by, remark
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        user_id,
-                        token_id,
-                        user_name,
-                        ip_address,
-                        "内网",
-                        browser_name,
-                        os_name,
-                        "0" if success else "1",
-                        message,
-                        token_jti,
-                        to_db_datetime_from_now(),
-                        user_id,
-                        user_name,
-                        user_id,
-                        user_name,
-                        "登录审计记录",
-                    ),
-                )
-            connection.commit()
+        await self.login_log_repository.create_log(
+            user_id=user_id,
+            token_id=token_id,
+            user_name=user_name,
+            ip_address=ip_address,
+            browser=browser_name,
+            os_name=os_name,
+            success=success,
+            message=message,
+            token_jti=token_jti,
+            login_time=to_db_datetime_from_now(),
+        )
 
     @staticmethod
     def _build_authenticated_user(user: UserRecord, token_id: int, username: str, token_jti: str) -> AuthenticatedUser:
@@ -229,8 +216,6 @@ def parse_user_agent(user_agent: str) -> tuple[str, str]:
     return browser_name, os_name
 
 
-def to_db_datetime_from_now() -> str:
+def to_db_datetime_from_now() -> datetime:
     """记录登录审计时统一取当前 UTC 时间。"""
-    from datetime import datetime, timezone
-
     return to_db_datetime(datetime.now(timezone.utc))

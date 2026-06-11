@@ -27,10 +27,10 @@ def get_auth_service(settings: Settings = Depends(get_settings)) -> AuthService:
     description="校验用户名密码后签发 JWT，并将当前登录令牌写入数据库。",
     response_description="登录结果，包含 Bearer Token 与当前用户信息。",
 )
-def login(payload: LoginRequest, request: Request, auth_service: AuthService = Depends(get_auth_service)):
+async def login(payload: LoginRequest, request: Request, auth_service: AuthService = Depends(get_auth_service)):
     client_ip = request.client.host if request.client else ""
     user_agent = request.headers.get("user-agent", "")
-    return ok(auth_service.login(payload.username, payload.password, client_ip, user_agent), msg="登录成功")
+    return ok(await auth_service.login(payload.username, payload.password, client_ip, user_agent), msg="登录成功")
 
 
 @router.get(
@@ -39,7 +39,7 @@ def login(payload: LoginRequest, request: Request, auth_service: AuthService = D
     description="根据 Bearer JWT 与服务端令牌表返回当前登录用户的资料信息。",
     response_description="当前登录用户资料。",
 )
-def get_profile(current_user: AuthenticatedUser = Depends(verify_jwt_dependency)):
+async def get_profile(current_user: AuthenticatedUser = Depends(verify_jwt_dependency)):
     return ok(current_user.to_auth_profile(), msg="查询当前用户资料成功")
 
 
@@ -49,9 +49,9 @@ def get_profile(current_user: AuthenticatedUser = Depends(verify_jwt_dependency)
     description="注销当前 JWT 令牌，使后续同一 Token 请求立即失效。",
     response_description="退出结果。",
 )
-def logout(
+async def logout(
     current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    auth_service.logout(current_user)
+    await auth_service.logout(current_user)
     return ok(msg="退出登录成功")

@@ -137,10 +137,10 @@ def extract_bearer_token(authorization: Optional[str]) -> str:
     return token.strip()
 
 
-def verify_jwt_dependency(
+async def verify_jwt_dependency(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
     settings: Settings = Depends(get_settings),
 ) -> AuthenticatedUser:
     """统一校验 Bearer JWT，并绑定服务端会话。"""
     token = extract_bearer_token(authorization)
-    return AuthService(settings).authenticate_access_token(token)
+    return await AuthService(settings).authenticate_access_token(token)

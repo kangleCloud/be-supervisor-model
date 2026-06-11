@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ArchiveStateError, ConfigAlreadyExistsError, InternalError
 from app.schemas.supervisor import (
     ServiceCreateRequest,
@@ -57,9 +58,9 @@ class SupervisorMutationService:
         self.supervisor_service = supervisor_service
         self.registry_service = registry_service
 
-    def create_service(self, payload: ServiceCreateRequest, current_user: AuthenticatedUser) -> dict[str, object]:
+    async def create_service(self, payload: ServiceCreateRequest, current_user: AuthenticatedUser) -> dict[str, object]:
         """创建 Supervisor 服务，远端和本地都允许。"""
-        self.host_service.get_host(payload.host)
+        await run_blocking(self.host_service.get_host, payload.host)
         target = self._render_target(payload)
         registry_data = self._build_registry_data(
             host=payload.host,
@@ -78,24 +79,35 @@ class SupervisorMutationService:
             metadata_complete=True,
             parse_warnings=(),
         )
-        self.registry_service.ensure_can_create(registry_data)
-        self.config_file_service.ensure_not_exists(payload.host, target.file_name, target.rendered.program_name)
-        self.port_check_service.ensure_no_conflict(payload.host, payload.port)
+        await self.registry_service.ensure_can_create(registry_data)
+        await run_blocking(
+            self.config_file_service.ensure_not_exists,
+            payload.host,
+            target.file_name,
+            target.rendered.program_name,
+        )
+        await run_blocking(self.port_check_service.ensure_no_conflict, payload.host, payload.port)
 
         LOGGER.info("新增服务：目标主机=%s，服务名称=%s，配置路径=%s", payload.host, target.rendered.program_name, target.config_path)
-        self.config_file_service.write_config(payload.host, target.file_name, target.rendered.content, target.rendered.program_name)
-        reread_result = self.supervisor_service.reread(payload.host)
-        update_result = self.supervisor_service.update(payload.host)
+        await run_blocking(
+            self.config_file_service.write_config,
+            payload.host,
+            target.file_name,
+            target.rendered.content,
+            target.rendered.program_name,
+        )
+        reread_result = await run_blocking(self.supervisor_service.reread, payload.host)
+        update_result = await run_blocking(self.supervisor_service.update, payload.host)
 
         try:
-            record = self.registry_service.create(
+            record = await self.registry_service.create(
                 registry_data,
                 operator_id=current_user.user_id,
                 operator_name=current_user.username,
                 remark="Supervisor 服务配置",
             )
         except Exception as exc:
-            rollback_result = self._rollback_create(payload.host, target.config_path)
+            rollback_result = await self._rollback_create(payload.host, target.config_path)
             if isinstance(exc, AppError):
                 raise
             LOGGER.exception("新增服务写库失败：目标主机=%s，configPath=%s", payload.host, target.config_path, exc_info=exc)
@@ -130,7 +142,7 @@ class SupervisorMutationService:
             "restoredAt": None,
         }
 
-    def update_service(
+    async def update_service(
         self,
         host: str,
         previous_program_name: str,
@@ -138,10 +150,14 @@ class SupervisorMutationService:
         current_user: AuthenticatedUser,
     ) -> dict[str, object]:
         """修改 Supervisor 服务，支持改名和改端口。"""
-        self.host_service.get_host(host)
-        current_record = self.registry_service.get_by_content_program_name(host, previous_program_name)
+        await run_blocking(self.host_service.get_host, host)
+        current_record = await self.registry_service.get_by_content_program_name(host, previous_program_name)
         self._ensure_not_archived(current_record, "服务已归档，不能修改")
-        current_content = self.config_file_service.read_raw_config_by_config_path(host, current_record.config_path)
+        current_content = await run_blocking(
+            self.config_file_service.read_raw_config_by_config_path,
+            host,
+            current_record.config_path,
+        )
         target = self._render_target(payload, base_config_path=current_record.config_path)
         registry_data = self._build_registry_data(
             host=host,
@@ -160,10 +176,9 @@ class SupervisorMutationService:
             metadata_complete=True,
             parse_warnings=(),
         )
-        # 修改时允许保留自身记录，因此数据库冲突校验必须排除当前主键。
-        self.registry_service.ensure_can_save(registry_data, exclude_record_id=current_record.id)
-        self._ensure_target_path_available(host, current_record, target.config_path)
-        self._ensure_port_available(host, current_record, payload.port)
+        await self.registry_service.ensure_can_save(registry_data, exclude_record_id=current_record.id)
+        await run_blocking(self._ensure_target_path_available, host, current_record, target.config_path)
+        await run_blocking(self._ensure_port_available, host, current_record, payload.port)
 
         identity_changed = (
             target.rendered.program_name != current_record.content_program_name
@@ -180,22 +195,31 @@ class SupervisorMutationService:
 
         command_results: dict[str, object] = {}
         if identity_changed:
-            command_results["stop"] = self.supervisor_service.stop(host, current_record.content_program_name, allow_not_running=True)
-        backup_result = self.config_file_service.backup_config_by_config_path(host, current_record.config_path)
+            command_results["stop"] = await run_blocking(
+                self.supervisor_service.stop,
+                host,
+                current_record.content_program_name,
+                True,
+            )
+        backup_result = await run_blocking(self.config_file_service.backup_config_by_config_path, host, current_record.config_path)
         command_results["backup"] = backup_result
-        write_result = self.config_file_service.write_config_by_config_path(host, target.config_path, target.rendered.content)
+        write_result = await run_blocking(self.config_file_service.write_config_by_config_path, host, target.config_path, target.rendered.content)
         command_results["write"] = write_result
         if target.config_path != current_record.config_path:
-            command_results["deleteOld"] = self.config_file_service.delete_config_by_config_path(host, current_record.config_path)
-        reread_result = self.supervisor_service.reread(host)
-        update_result = self.supervisor_service.update(host)
+            command_results["deleteOld"] = await run_blocking(
+                self.config_file_service.delete_config_by_config_path,
+                host,
+                current_record.config_path,
+            )
+        reread_result = await run_blocking(self.supervisor_service.reread, host)
+        update_result = await run_blocking(self.supervisor_service.update, host)
         command_results["reread"] = reread_result
         command_results["update"] = update_result
-        status, pid, uptime = self._query_runtime_snapshot(host, target.rendered.program_name)
-        parsed_target = self.template_service.parse(target.rendered.content)
+        status, pid, uptime = await self._query_runtime_snapshot(host, target.rendered.program_name)
+        parsed_target = await run_blocking(self.template_service.parse, target.rendered.content)
 
         try:
-            self.registry_service.update_service(
+            await self.registry_service.update_service(
                 record_id=current_record.id,
                 data=registry_data,
                 operator_id=current_user.user_id,
@@ -214,7 +238,7 @@ class SupervisorMutationService:
                 sync_error=None,
             )
         except Exception as exc:
-            rollback_result = self._rollback_update(
+            rollback_result = await self._rollback_update(
                 host=host,
                 previous_config_path=current_record.config_path,
                 target_config_path=target.config_path,
@@ -230,7 +254,7 @@ class SupervisorMutationService:
             )
             raise InternalError("修改服务写库失败", rollback_result) from exc
 
-        updated_record = self.registry_service.get_by_content_program_name(host, target.rendered.program_name)
+        updated_record = await self.registry_service.get_by_content_program_name(host, target.rendered.program_name)
         return ServiceUpdateResponse(
             host=host,
             previousContentProgramName=current_record.content_program_name,
@@ -241,39 +265,39 @@ class SupervisorMutationService:
             commandResults=command_results,
         ).model_dump(by_alias=True)
 
-    def delete_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+    async def delete_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
         """删除 Supervisor 服务，必须先停止再删现场和数据库。"""
         del current_user
-        self.host_service.get_host(host)
-        record = self.registry_service.get_by_content_program_name(host, program_name)
+        await run_blocking(self.host_service.get_host, host)
+        record = await self.registry_service.get_by_content_program_name(host, program_name)
         self._ensure_not_archived(record, "服务已归档，不能删除")
 
         LOGGER.info("删除服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.content_program_name, record.config_path)
         command_results: dict[str, object] = {
-            "stop": self.supervisor_service.stop(host, record.content_program_name, allow_not_running=True),
+            "stop": await run_blocking(self.supervisor_service.stop, host, record.content_program_name, True),
         }
 
-        existed = self.config_file_service.exists_by_config_path(host, record.config_path)
+        existed = await run_blocking(self.config_file_service.exists_by_config_path, host, record.config_path)
         backup_path: str | None = None
         if existed:
-            backup_result = self.config_file_service.backup_config_by_config_path(host, record.config_path)
+            backup_result = await run_blocking(self.config_file_service.backup_config_by_config_path, host, record.config_path)
             command_results["backup"] = backup_result
-            command_results["delete"] = self.config_file_service.delete_config_by_config_path(host, record.config_path)
+            command_results["delete"] = await run_blocking(self.config_file_service.delete_config_by_config_path, host, record.config_path)
             backup_path = backup_result["backupPath"]
         else:
             command_results["backup"] = None
             command_results["delete"] = None
             backup_candidate = f"{record.config_path}.bak"
-            if self.config_file_service.exists_by_config_path(host, backup_candidate, allow_backups=True):
+            if await run_blocking(self.config_file_service.exists_by_config_path, host, backup_candidate, allow_backups=True):
                 backup_path = backup_candidate
 
-        command_results["reread"] = self.supervisor_service.reread(host)
-        command_results["update"] = self.supervisor_service.update(host)
+        command_results["reread"] = await run_blocking(self.supervisor_service.reread, host)
+        command_results["update"] = await run_blocking(self.supervisor_service.update, host)
 
         try:
-            self.registry_service.delete_service(record.id)
+            await self.registry_service.delete_service(record.id)
         except Exception as exc:
-            rollback_result = self._rollback_delete(host, record.config_path, existed)
+            rollback_result = await self._rollback_delete(host, record.config_path, existed)
             if isinstance(exc, AppError):
                 raise
             LOGGER.exception("删除服务写库失败：目标主机=%s，服务名称=%s", host, record.content_program_name, exc_info=exc)
@@ -376,9 +400,9 @@ class SupervisorMutationService:
         if record.is_archived:
             raise ArchiveStateError(message)
 
-    def _query_runtime_snapshot(self, host: str, program_name: str) -> tuple[str, str | None, str | None]:
+    async def _query_runtime_snapshot(self, host: str, program_name: str) -> tuple[str, str | None, str | None]:
         try:
-            status_entries = self.supervisor_service.status(host, program_name)
+            status_entries = await run_blocking(self.supervisor_service.status, host, program_name)
         except AppError:
             status_entries = []
         entry = status_entries[0] if status_entries else None
@@ -386,24 +410,24 @@ class SupervisorMutationService:
             return "UNKNOWN", None, None
         return entry.state, entry.pid, entry.uptime
 
-    def _rollback_create(self, host: str, config_path: str) -> dict[str, object]:
+    async def _rollback_create(self, host: str, config_path: str) -> dict[str, object]:
         rollback: dict[str, object] = {"configRemoved": False, "reread": None, "update": None}
-        if self.config_file_service.exists_by_config_path(host, config_path):
+        if await run_blocking(self.config_file_service.exists_by_config_path, host, config_path):
             try:
-                self.config_file_service.delete_config_by_config_path(host, config_path)
+                await run_blocking(self.config_file_service.delete_config_by_config_path, host, config_path)
                 rollback["configRemoved"] = True
             except AppError as exc:
                 rollback["configRemoveError"] = exc.msg
                 return rollback
 
         try:
-            rollback["reread"] = self.supervisor_service.reread(host)
-            rollback["update"] = self.supervisor_service.update(host)
+            rollback["reread"] = await run_blocking(self.supervisor_service.reread, host)
+            rollback["update"] = await run_blocking(self.supervisor_service.update, host)
         except AppError as exc:
             rollback["rollbackError"] = exc.msg
         return rollback
 
-    def _rollback_update(
+    async def _rollback_update(
         self,
         *,
         host: str,
@@ -411,39 +435,47 @@ class SupervisorMutationService:
         target_config_path: str,
     ) -> dict[str, object]:
         rollback: dict[str, object] = {"targetRemoved": False, "restored": None, "reread": None, "update": None}
-        if target_config_path != previous_config_path and self.config_file_service.exists_by_config_path(host, target_config_path):
+        if target_config_path != previous_config_path and await run_blocking(
+            self.config_file_service.exists_by_config_path,
+            host,
+            target_config_path,
+        ):
             try:
-                self.config_file_service.delete_config_by_config_path(host, target_config_path)
+                await run_blocking(self.config_file_service.delete_config_by_config_path, host, target_config_path)
                 rollback["targetRemoved"] = True
             except AppError as exc:
                 rollback["targetRemoveError"] = exc.msg
                 return rollback
 
         try:
-            rollback["restored"] = self.config_file_service.restore_config_by_config_path(host, previous_config_path)
+            rollback["restored"] = await run_blocking(
+                self.config_file_service.restore_config_by_config_path,
+                host,
+                previous_config_path,
+            )
         except AppError as exc:
             rollback["restoreError"] = exc.msg
             return rollback
 
         try:
-            rollback["reread"] = self.supervisor_service.reread(host)
-            rollback["update"] = self.supervisor_service.update(host)
+            rollback["reread"] = await run_blocking(self.supervisor_service.reread, host)
+            rollback["update"] = await run_blocking(self.supervisor_service.update, host)
         except AppError as exc:
             rollback["rollbackError"] = exc.msg
         return rollback
 
-    def _rollback_delete(self, host: str, config_path: str, existed: bool) -> dict[str, object]:
+    async def _rollback_delete(self, host: str, config_path: str, existed: bool) -> dict[str, object]:
         rollback: dict[str, object] = {"restored": None, "reread": None, "update": None}
         if existed:
             try:
-                rollback["restored"] = self.config_file_service.restore_config_by_config_path(host, config_path)
+                rollback["restored"] = await run_blocking(self.config_file_service.restore_config_by_config_path, host, config_path)
             except AppError as exc:
                 rollback["restoreError"] = exc.msg
                 return rollback
 
         try:
-            rollback["reread"] = self.supervisor_service.reread(host)
-            rollback["update"] = self.supervisor_service.update(host)
+            rollback["reread"] = await run_blocking(self.supervisor_service.reread, host)
+            rollback["update"] = await run_blocking(self.supervisor_service.update, host)
         except AppError as exc:
             rollback["rollbackError"] = exc.msg
         return rollback

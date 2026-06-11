@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 
 from app.core.config import HostConfig, get_settings
 from app.core.exceptions import AppError
-from app.core.database import initialize_database
+from app.database.bootstrap import close_database, init_database
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
 from app.services.supervisor_import_service import (
@@ -33,6 +34,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    return asyncio.run(async_main())
+
+
+async def async_main() -> int:
     args = parse_args()
     settings = get_settings()
     host_service = HostService(settings)
@@ -48,63 +53,64 @@ def main() -> int:
         staging_service,
     )
 
-    # 预检会写暂存表，因此脚本无论是否 --apply 都必须先确保基线表已初始化。
-    initialize_database(settings)
+    await init_database(settings)
+    try:
+        target_hosts = list(iter_target_hosts(settings.hosts, args.host))
+        if not target_hosts:
+            print(f"未找到可导入主机: {args.host}")
+            return 1
 
-    target_hosts = list(iter_target_hosts(settings.hosts, args.host))
-    if not target_hosts:
-        print(f"未找到可导入主机: {args.host}")
-        return 1
+        summary = {"planned": 0, "imported": 0, "updated": 0, "skipped": 0}
+        mode = IMPORT_MODE_COMMIT if args.apply else IMPORT_MODE_PRECHECK
+        print(f"== 导入模式 {mode}，recursive={args.recursive} ==")
+        for host in target_hosts:
+            print(f"== 处理主机 {host.ip} ({host.name}) ==")
+            try:
+                precheck_report = await import_service.execute(
+                    host=host.ip,
+                    mode=IMPORT_MODE_PRECHECK,
+                    operator_id=0,
+                    operator_name="system",
+                    recursive=args.recursive,
+                )
+            except AppError as exc:
+                print(f"导入失败: {exc}")
+                continue
+            _print_report(precheck_report)
+            summary["planned"] += precheck_report.summary.planned
+            summary["skipped"] += precheck_report.summary.skipped
 
-    summary = {"planned": 0, "imported": 0, "updated": 0, "skipped": 0}
-    mode = IMPORT_MODE_COMMIT if args.apply else IMPORT_MODE_PRECHECK
-    print(f"== 导入模式 {mode}，recursive={args.recursive} ==")
-    for host in target_hosts:
-        print(f"== 处理主机 {host.ip} ({host.name}) ==")
-        try:
-            precheck_report = import_service.execute(
-                host=host.ip,
-                mode=IMPORT_MODE_PRECHECK,
-                operator_id=0,
-                operator_name="system",
-                recursive=args.recursive,
-            )
-        except AppError as exc:
-            print(f"导入失败: {exc}")
-            continue
-        _print_report(precheck_report)
-        summary["planned"] += precheck_report.summary.planned
-        summary["skipped"] += precheck_report.summary.skipped
+            if not args.apply:
+                continue
 
-        if not args.apply:
-            continue
+            try:
+                commit_report = await import_service.execute(
+                    host=host.ip,
+                    mode=IMPORT_MODE_COMMIT,
+                    operator_id=0,
+                    operator_name="system",
+                    batch_id=precheck_report.batch_id,
+                    recursive=args.recursive,
+                )
+            except AppError as exc:
+                print(f"提交失败: {exc}")
+                continue
+            _print_report(commit_report)
+            summary["imported"] += commit_report.summary.imported
+            summary["updated"] += commit_report.summary.updated
 
-        try:
-            commit_report = import_service.execute(
-                host=host.ip,
-                mode=IMPORT_MODE_COMMIT,
-                operator_id=0,
-                operator_name="system",
-                batch_id=precheck_report.batch_id,
-                recursive=args.recursive,
-            )
-        except AppError as exc:
-            print(f"提交失败: {exc}")
-            continue
-        _print_report(commit_report)
-        summary["imported"] += commit_report.summary.imported
-        summary["updated"] += commit_report.summary.updated
-
-    print(
-        "导入完成: "
-        "mode="
-        f"{mode}, planned={summary['planned']}, imported={summary['imported']}, "
-        f"updated={summary['updated']}, skipped={summary['skipped']}"
-    )
-    return 0
+        print(
+            "导入完成: "
+            "mode="
+            f"{mode}, planned={summary['planned']}, imported={summary['imported']}, "
+            f"updated={summary['updated']}, skipped={summary['skipped']}"
+        )
+        return 0
+    finally:
+        await close_database()
 
 
-def iter_target_hosts(hosts: list[HostConfig], host_filter: str) -> list[HostConfig]:
+def iter_target_hosts(hosts: list[HostConfig] | tuple[HostConfig, ...], host_filter: str) -> list[HostConfig]:
     """仅返回启用的目标主机，避免脚本触达无效配置。"""
     result: list[HostConfig] = []
     for host in hosts:

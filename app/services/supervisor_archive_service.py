@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ArchiveStateError
 from app.schemas.supervisor import ArchiveActionResponse
 from app.services.config_file_service import ConfigFileService
@@ -39,7 +40,7 @@ class SupervisorArchiveService:
         self.registry_service = registry_service
         self.supervisor_service = supervisor_service
 
-    def archive_service(
+    async def archive_service(
         self,
         host: str,
         program_name: str,
@@ -48,19 +49,19 @@ class SupervisorArchiveService:
         operator_name: str,
     ) -> dict[str, object]:
         """归档服务并联动远端 .ini 现场。"""
-        record = self._load_record(host, program_name)
+        record = await self._load_record(host, program_name)
         if record.is_archived:
             raise ArchiveStateError("服务已归档，无需重复归档")
 
         LOGGER.info("归档服务：目标主机=%s，服务名称=%s", host, record.content_program_name)
-        stop_result = self.supervisor_service.stop(host, record.content_program_name, allow_not_running=True)
-        backup_result = self.config_file_service.backup_config_by_config_path(host, record.config_path)
-        delete_result = self.config_file_service.delete_config_by_config_path(host, record.config_path)
-        reread_result = self.supervisor_service.reread(host)
-        update_result = self.supervisor_service.update(host)
+        stop_result = await run_blocking(self.supervisor_service.stop, host, record.content_program_name, True)
+        backup_result = await run_blocking(self.config_file_service.backup_config_by_config_path, host, record.config_path)
+        delete_result = await run_blocking(self.config_file_service.delete_config_by_config_path, host, record.config_path)
+        reread_result = await run_blocking(self.supervisor_service.reread, host)
+        update_result = await run_blocking(self.supervisor_service.update, host)
 
         archived_at = datetime.now()
-        self.registry_service.mark_archived(
+        await self.registry_service.mark_archived(
             host=host,
             content_program_name=record.content_program_name,
             operator_id=operator_id,
@@ -86,7 +87,7 @@ class SupervisorArchiveService:
             },
         ).model_dump(by_alias=True)
 
-    def restore_service(
+    async def restore_service(
         self,
         host: str,
         program_name: str,
@@ -95,18 +96,19 @@ class SupervisorArchiveService:
         operator_name: str,
     ) -> dict[str, object]:
         """还原归档服务的配置，但不自动启动。"""
-        record = self._load_record(host, program_name)
+        del operator_id, operator_name
+        record = await self._load_record(host, program_name)
         if not record.is_archived:
             raise ArchiveStateError("服务未归档，无需还原")
 
         LOGGER.info("还原服务：目标主机=%s，服务名称=%s", host, record.content_program_name)
-        restore_result = self.config_file_service.restore_config_by_config_path(host, record.config_path)
-        reread_result = self.supervisor_service.reread(host)
-        update_result = self.supervisor_service.update(host)
-        status, pid, uptime = self._query_runtime_snapshot(host, record.content_program_name)
+        restore_result = await run_blocking(self.config_file_service.restore_config_by_config_path, host, record.config_path)
+        reread_result = await run_blocking(self.supervisor_service.reread, host)
+        update_result = await run_blocking(self.supervisor_service.update, host)
+        status, pid, uptime = await self._query_runtime_snapshot(host, record.content_program_name)
 
         restored_at = datetime.now()
-        self.registry_service.mark_restored(
+        await self.registry_service.mark_restored(
             host=host,
             content_program_name=record.content_program_name,
             restored_at=restored_at,
@@ -131,14 +133,14 @@ class SupervisorArchiveService:
             },
         ).model_dump(by_alias=True)
 
-    def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
-        self.host_service.get_host(host)
-        return self.registry_service.get_by_content_program_name(host, program_name)
+    async def _load_record(self, host: str, program_name: str) -> SupervisorRegistryRecord:
+        await run_blocking(self.host_service.get_host, host)
+        return await self.registry_service.get_by_content_program_name(host, program_name)
 
-    def _query_runtime_snapshot(self, host: str, program_name: str) -> tuple[str, str | None, str | None]:
+    async def _query_runtime_snapshot(self, host: str, program_name: str) -> tuple[str, str | None, str | None]:
         # 还原后只同步现场状态，不自动执行 start，查不到就回写 UNKNOWN。
         try:
-            status_entries = self.supervisor_service.status(host, program_name)
+            status_entries = await run_blocking(self.supervisor_service.status, host, program_name)
         except AppError:
             status_entries = []
         entry = status_entries[0] if status_entries else None

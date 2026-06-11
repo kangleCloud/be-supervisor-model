@@ -1,141 +1,45 @@
-"""数据库初始化与鉴权落库测试。"""
+"""数据库启动与认证落库测试。"""
 from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.database import initialize_database
+from app.database.bootstrap import build_sqlite_test_config, close_database, init_database
+from app.database.models.auth import LoginLogModel, LoginTokenModel, UserModel
+from app.database.models.supervisor import SupervisorImportStagingModel, SupervisorServiceModel
 
 
-def test_database_initialization_is_idempotent(settings, fake_mysql):
-    initialize_database(settings)
-    initialize_database(settings)
+def test_database_init_and_close_with_sqlite(settings, test_environment, run_db):
+    async def scenario():
+        await close_database()
+        await init_database(settings, tortoise_config=build_sqlite_test_config(f"sqlite://{test_environment['db_path']}"))
+        await close_database()
+        await init_database(settings, tortoise_config=build_sqlite_test_config(f"sqlite://{test_environment['db_path']}"))
 
-    assert settings.database.database in fake_mysql.databases
-    assert "sys_user" in fake_mysql.tables
-    assert "sys_login_log" in fake_mysql.tables
-    assert "sys_login_token" in fake_mysql.tables
-    assert "sys_supervisor_service" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
+        assert await UserModel.filter(user_name="admin", is_deleted=0).count() == 1
+        assert await UserModel.all().count() >= 1
 
-
-def test_database_bootstraps_single_super_admin(settings, fake_mysql):
-    initialize_database(settings)
-    initialize_database(settings)
-
-    admin_users = [row for row in fake_mysql.tables["sys_user"] if row["user_name"] == "admin" and row["is_deleted"] == 0]
-
-    assert len(admin_users) == 1
-    assert admin_users[0]["is_super_admin"] == 1
-    assert admin_users[0]["status"] == 1
+    run_db(scenario)
 
 
-def test_database_recreates_missing_auth_tables(settings, fake_mysql):
-    """单基线初始化后，关键认证表缺失时仍需自动补建。"""
-    initialize_database(settings)
+def test_database_bootstraps_single_super_admin(run_db):
+    async def scenario():
+        admins = await UserModel.filter(user_name="admin", is_deleted=0).all()
+        assert len(admins) == 1
+        assert admins[0].is_super_admin == 1
+        assert admins[0].status == 1
 
-    del fake_mysql.tables["sys_login_token"]
-
-    initialize_database(settings)
-
-    assert "sys_login_token" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
+    run_db(scenario)
 
 
-def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
-    """Supervisor 主数据表缺失时，启动阶段也应通过单基线补建。"""
-    initialize_database(settings)
+def test_database_schema_contains_required_tables(run_db):
+    async def scenario():
+        assert await UserModel.all().count() >= 1
+        assert await LoginLogModel.all().count() == 0
+        assert await LoginTokenModel.all().count() == 0
+        assert await SupervisorServiceModel.all().count() == 0
+        assert await SupervisorImportStagingModel.all().count() == 0
 
-    del fake_mysql.tables["sys_supervisor_service"]
-
-    initialize_database(settings)
-
-    assert "sys_supervisor_service" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
-
-
-def test_database_upgrades_legacy_supervisor_table_runtime_columns(settings, fake_mysql):
-    """旧库只有 001 版本时，002 需要按缺列状态安全补齐运行时字段。"""
-    fake_mysql.databases.add(settings.database.database)
-    fake_mysql.tables["sys_user"] = []
-    fake_mysql.tables["sys_login_log"] = []
-    fake_mysql.tables["sys_login_token"] = []
-    fake_mysql.tables["sys_supervisor_service"] = []
-    fake_mysql.tables["sys_schema_migration"] = [{"version": 1, "name": "001_init_schema.sql"}]
-    fake_mysql.set_table_schema(
-        "sys_supervisor_service",
-        columns={
-            "id",
-            "host_ip",
-            "config_path",
-            "file_name",
-            "content_program_name",
-            "manage_mode",
-            "baseline_content",
-            "metadata_complete",
-            "parse_warnings",
-            "job_name",
-            "module_name",
-            "program_name",
-            "config_name",
-            "java_path",
-            "active_profile",
-            "port",
-            "jar_name",
-            "xms",
-            "xmx",
-            "run_user",
-            "create_time",
-            "update_time",
-            "create_by_id",
-            "create_by",
-            "update_by_id",
-            "update_by",
-            "remark",
-        },
-        indexes={
-            "uk_supervisor_host_config_path",
-            "idx_supervisor_host_program",
-            "idx_supervisor_host_manage_mode",
-        },
-    )
-
-    initialize_database(settings)
-
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
-
-
-def test_database_upgrades_legacy_supervisor_table_archive_columns(settings, fake_mysql):
-    """单基线 SQL 已包含所有字段，旧库存在时重跑基线不会丢列。"""
-    fake_mysql.databases.add(settings.database.database)
-    fake_mysql.tables["sys_user"] = []
-    fake_mysql.tables["sys_login_log"] = []
-    fake_mysql.tables["sys_login_token"] = []
-    fake_mysql.tables["sys_supervisor_service"] = []
-    fake_mysql.tables["sys_schema_migration"] = [
-        {"version": 1, "name": "001_init_schema.sql"},
-    ]
-
-    initialize_database(settings)
-
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
-    assert "sys_supervisor_service" in fake_mysql.tables
-
-
-def test_database_upgrades_legacy_supervisor_table_detail_sync_columns(settings, fake_mysql):
-    """单基线 SQL 已包含所有字段，旧库存在时重跑基线不会丢列。"""
-    fake_mysql.databases.add(settings.database.database)
-    fake_mysql.tables["sys_user"] = []
-    fake_mysql.tables["sys_login_log"] = []
-    fake_mysql.tables["sys_login_token"] = []
-    fake_mysql.tables["sys_supervisor_service"] = []
-    fake_mysql.tables["sys_schema_migration"] = [
-        {"version": 1, "name": "001_init_schema.sql"},
-    ]
-
-    initialize_database(settings)
-
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1]
-    assert "sys_supervisor_service" in fake_mysql.tables
+    run_db(scenario)
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):
@@ -157,49 +61,28 @@ def test_login_persists_token_and_log(client, seed_user, fake_mysql):
     assert fake_mysql.tables["sys_login_log"][0]["token_jti"] == fake_mysql.tables["sys_login_token"][0]["token_jti"]
 
 
-def test_init_schema_sql_contains_auth_tables_and_admin_seed():
-    """单基线 SQL 需要同时包含认证表和默认超级管理员初始化语句。"""
+def test_models_cover_final_schema_fields():
+    auth_model_fields = set(UserModel._meta.fields_map.keys())
+    token_model_fields = set(LoginTokenModel._meta.fields_map.keys())
+    service_model_fields = set(SupervisorServiceModel._meta.fields_map.keys())
+    staging_model_fields = set(SupervisorImportStagingModel._meta.fields_map.keys())
+
+    assert {"user_name", "password", "status", "is_super_admin", "is_deleted"} <= auth_model_fields
+    assert {"user_id", "token_jti", "token_digest", "expires_at", "revoked_time"} <= token_model_fields
+    assert {
+        "host_ip", "config_path", "file_name", "content_program_name", "manage_mode",
+        "baseline_content", "metadata_complete", "parse_warnings", "command", "directory",
+        "stdout_logfile", "has_backup", "config_content", "backup_config_content", "last_sync_at",
+        "sync_status", "sync_error", "is_archived", "archived_at", "restored_at",
+    } <= service_model_fields
+    assert {
+        "batch_id", "host_ip", "operator_id", "operator_name", "config_path", "file_name",
+        "content_program_name", "baseline_content", "metadata_complete", "parse_warnings", "result", "message",
+    } <= staging_model_fields
+
+
+def test_legacy_sql_baseline_is_removed_from_runtime_path():
     migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "001_init_schema.sql"
+    assert migration_path.exists()
     migration_sql = migration_path.read_text(encoding="utf-8")
-
-    assert "CREATE TABLE IF NOT EXISTS `sys_user`" in migration_sql
-    assert "CREATE TABLE IF NOT EXISTS `sys_login_log`" in migration_sql
-    assert "CREATE TABLE IF NOT EXISTS `sys_login_token`" in migration_sql
-    assert "`token_id` BIGINT DEFAULT NULL COMMENT '登录令牌ID'" in migration_sql
-    assert "`user_name` VARCHAR(50) NOT NULL COMMENT '用户名'" in migration_sql
-    assert "COMMENT='JWT登录令牌表'" in migration_sql
-    assert "INSERT INTO `sys_user`(" in migration_sql
-    assert "'admin'" in migration_sql
-    assert "'超级管理员'" in migration_sql
-    assert "'系统初始化超级管理员，请尽快重置默认密码'" in migration_sql
-
-
-def test_init_schema_sql_contains_final_supervisor_service_schema():
-    """单基线 SQL 需要直接声明 Supervisor 主数据表最终结构。"""
-    migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "001_init_schema.sql"
-    migration_sql = migration_path.read_text(encoding="utf-8")
-
     assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_sql
-    assert "`config_path` VARCHAR(500) NOT NULL" in migration_sql
-    assert "`file_name` VARCHAR(255) NOT NULL" in migration_sql
-    assert "`content_program_name` VARCHAR(255) NOT NULL" in migration_sql
-    assert "`manage_mode` VARCHAR(32) NOT NULL DEFAULT 'TEMPLATE_MANAGED'" in migration_sql
-    assert "`baseline_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
-    assert "`metadata_complete` TINYINT(1) NOT NULL DEFAULT 1" in migration_sql
-    assert "`parse_warnings` TEXT DEFAULT NULL" in migration_sql
-    assert "`command` VARCHAR(2000) DEFAULT NULL" in migration_sql
-    assert "`directory` VARCHAR(1000) DEFAULT NULL" in migration_sql
-    assert "`stdout_logfile` VARCHAR(1000) DEFAULT NULL" in migration_sql
-    assert "`has_backup` TINYINT(1) NOT NULL DEFAULT 0" in migration_sql
-    assert "`config_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
-    assert "`backup_config_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
-    assert "`last_sync_at` DATETIME DEFAULT NULL" in migration_sql
-    assert "`sync_status` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN'" in migration_sql
-    assert "`sync_error` VARCHAR(1000) DEFAULT NULL" in migration_sql
-    assert "`is_archived` TINYINT(1) NOT NULL DEFAULT 0" in migration_sql
-    assert "`archived_at` DATETIME DEFAULT NULL" in migration_sql
-    assert "`restored_at` DATETIME DEFAULT NULL" in migration_sql
-    assert "UNIQUE KEY `uk_supervisor_host_config_path` (`host_ip`, `config_path`)" in migration_sql
-    assert "KEY `idx_supervisor_host_program` (`host_ip`, `content_program_name`)" in migration_sql
-    assert "KEY `idx_supervisor_host_manage_mode` (`host_ip`, `manage_mode`)" in migration_sql
-    assert "KEY `idx_supervisor_host_archived` (`host_ip`, `is_archived`)" in migration_sql

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.core.config import Settings
-from app.core.database import get_connection
+from app.database.repositories.auth import UserRepository
 
 
 @dataclass(frozen=True)
@@ -47,67 +48,29 @@ class UserService:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.repository = UserRepository()
 
-    def get_by_username(self, username: str) -> UserRecord | None:
+    async def get_by_username(self, username: str) -> UserRecord | None:
         """按用户名读取未删除用户。"""
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, user_name, nick_name, password, status, is_super_admin
-                    FROM sys_user
-                    WHERE user_name = %s AND is_deleted = 0
-                    LIMIT 1
-                    """,
-                    (username,),
-                )
-                row = cursor.fetchone()
-        return self._build_user(row)
+        return self._build_user(await self.repository.find_by_username(username))
 
-    def get_by_id(self, user_id: int) -> UserRecord | None:
+    async def get_by_id(self, user_id: int) -> UserRecord | None:
         """按用户 ID 读取未删除用户。"""
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT id, user_name, nick_name, password, status, is_super_admin
-                    FROM sys_user
-                    WHERE id = %s AND is_deleted = 0
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
-                row = cursor.fetchone()
-        return self._build_user(row)
+        return self._build_user(await self.repository.find_by_id(user_id))
 
-    def update_login_info(self, user_id: int, username: str, login_time: str, login_address: str) -> None:
+    async def update_login_info(self, user_id: int, username: str, login_time: datetime, login_address: str) -> None:
         """记录最近一次成功登录时间与地址。"""
-        with get_connection(self.settings) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    """
-                    UPDATE sys_user
-                    SET login_time = %s,
-                        login_address = %s,
-                        update_time = CURRENT_TIMESTAMP,
-                        update_by_id = %s,
-                        update_by = %s,
-                        version = version + 1
-                    WHERE id = %s AND is_deleted = 0
-                    """,
-                    (login_time, login_address, user_id, username, user_id),
-                )
-            connection.commit()
+        await self.repository.update_login_info(user_id, username, login_time, login_address)
 
     @staticmethod
-    def _build_user(row: dict[str, object] | None) -> UserRecord | None:
+    def _build_user(row) -> UserRecord | None:
         if row is None:
             return None
         return UserRecord(
-            id=int(row["id"]),
-            user_name=str(row["user_name"]),
-            nick_name=str(row["nick_name"]) if row.get("nick_name") is not None else None,
-            password=str(row["password"]),
-            status=int(row["status"]),
-            is_super_admin=int(row["is_super_admin"]),
+            id=int(row.id),
+            user_name=str(row.user_name),
+            nick_name=str(row.nick_name) if row.nick_name is not None else None,
+            password=str(row.password),
+            status=int(row.status),
+            is_super_admin=int(row.is_super_admin),
         )
