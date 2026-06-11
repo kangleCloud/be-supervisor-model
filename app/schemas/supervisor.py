@@ -206,6 +206,98 @@ class StatusRefreshResponse(BaseModel):
     missing: int
 
 
+class ServiceDetailResponse(BaseModel):
+    """服务详情响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int
+    host: str
+    host_name: str = Field(alias="hostName")
+    program_name: str = Field(alias="programName")
+    config_name: str = Field(alias="configName")
+    config_path: str = Field(alias="configPath")
+    job_name: str | None = Field(default=None, alias="jobName")
+    module_name: str | None = Field(default=None, alias="moduleName")
+    java_path: str | None = Field(default=None, alias="javaPath")
+    active: str | None = Field(default=None)
+    port: int | None = Field(default=None)
+    jar_name: str | None = Field(default=None, alias="jarName")
+    xms: str | None = Field(default=None)
+    xmx: str | None = Field(default=None)
+    user: str | None = Field(default=None)
+    command: str | None = Field(default=None)
+    directory: str | None = Field(default=None)
+    stdout_logfile: str | None = Field(default=None, alias="stdoutLogfile")
+    status: str = Field(default="UNKNOWN")
+    pid: str | None = Field(default=None)
+    uptime: str | None = Field(default=None)
+    has_backup: bool = Field(default=False, alias="hasBackup")
+    config_content: str | None = Field(default=None, alias="configContent")
+    backup_config_content: str | None = Field(default=None, alias="backupConfigContent")
+    is_archived: bool = Field(default=False, alias="isArchived")
+    archived_at: str | None = Field(default=None, alias="archivedAt")
+    restored_at: str | None = Field(default=None, alias="restoredAt")
+    last_sync_at: str | None = Field(default=None, alias="lastSyncAt")
+    sync_status: str = Field(default="UNKNOWN", alias="syncStatus")
+    sync_error: str | None = Field(default=None, alias="syncError")
+    updated_at: str | None = Field(default=None, alias="updatedAt")
+
+    @classmethod
+    def from_record(cls, record, *, host_name: str) -> "ServiceDetailResponse":
+        return cls(
+            id=record.id,
+            host=record.host_ip,
+            hostName=host_name,
+            programName=record.program_name,
+            configName=record.config_name,
+            configPath=record.config_path,
+            jobName=record.job_name,
+            moduleName=record.module_name,
+            javaPath=record.java_path,
+            active=record.active_profile,
+            port=record.port,
+            jarName=record.jar_name,
+            xms=record.xms,
+            xmx=record.xmx,
+            user=record.run_user,
+            command=record.command,
+            directory=record.directory,
+            stdoutLogfile=record.stdout_logfile,
+            status=record.status,
+            pid=record.pid,
+            uptime=record.uptime,
+            hasBackup=record.has_backup,
+            configContent=record.config_content,
+            backupConfigContent=record.backup_config_content,
+            isArchived=record.is_archived,
+            archivedAt=_format_datetime_text(record.archived_at),
+            restoredAt=_format_datetime_text(record.restored_at),
+            lastSyncAt=_format_datetime_text(record.last_sync_at),
+            syncStatus=record.sync_status,
+            syncError=record.sync_error,
+            updatedAt=_format_datetime_text(record.update_time),
+        )
+
+
+class ServiceSyncResponse(BaseModel):
+    """单服务详情同步响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    program_name: str = Field(alias="programName")
+    status: str
+    pid: str | None = Field(default=None)
+    uptime: str | None = Field(default=None)
+    synced_fields: list[str] = Field(default_factory=list, alias="syncedFields")
+    warnings: list[str] = Field(default_factory=list)
+    last_sync_at: str = Field(alias="lastSyncAt")
+    sync_status: str = Field(alias="syncStatus")
+    sync_error: str | None = Field(default=None, alias="syncError")
+    command_results: dict[str, object] = Field(alias="commandResults")
+
+
 class RuntimeActionResponse(BaseModel):
     """运行操作响应。"""
 

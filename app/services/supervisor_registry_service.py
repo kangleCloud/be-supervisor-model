@@ -78,6 +78,15 @@ class SupervisorRegistryRecord:
     pid: str | None
     uptime: str | None
     status_sync_time: datetime | None
+    command: str | None
+    directory: str | None
+    stdout_logfile: str | None
+    has_backup: bool
+    config_content: str | None
+    backup_config_content: str | None
+    last_sync_at: datetime | None
+    sync_status: str
+    sync_error: str | None
     is_archived: bool
     archived_at: datetime | None
     restored_at: datetime | None
@@ -102,6 +111,8 @@ class SupervisorRegistryService:
                            job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user,
                            status, pid, uptime, status_sync_time,
+                           command, directory, stdout_logfile, has_backup,
+                           config_content, backup_config_content, last_sync_at, sync_status, sync_error,
                            is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s
@@ -132,6 +143,8 @@ class SupervisorRegistryService:
                            job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user,
                            status, pid, uptime, status_sync_time,
+                           command, directory, stdout_logfile, has_backup,
+                           config_content, backup_config_content, last_sync_at, sync_status, sync_error,
                            is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s AND program_name = %s
@@ -155,6 +168,8 @@ class SupervisorRegistryService:
                            job_name, module_name, program_name, config_name,
                            java_path, active_profile, port, jar_name, xms, xmx, run_user,
                            status, pid, uptime, status_sync_time,
+                           command, directory, stdout_logfile, has_backup,
+                           config_content, backup_config_content, last_sync_at, sync_status, sync_error,
                            is_archived, archived_at, restored_at, update_time
                     FROM sys_supervisor_service
                     WHERE host_ip = %s AND config_path = %s
@@ -270,6 +285,96 @@ class SupervisorRegistryService:
                     WHERE host_ip = %s AND program_name = %s
                     """,
                     (status, pid, uptime, now_str, safe_host, safe_program_name),
+                )
+            connection.commit()
+
+    def update_detail_sync_snapshot(
+        self,
+        host: str,
+        program_name: str,
+        *,
+        sync_time: datetime | None = None,
+        status: str,
+        pid: str | None,
+        uptime: str | None,
+        command: str | None,
+        directory: str | None,
+        stdout_logfile: str | None,
+        job_name: str | None,
+        module_name: str | None,
+        java_path: str | None,
+        active_profile: str | None,
+        port: int | None,
+        jar_name: str | None,
+        xms: str | None,
+        xmx: str | None,
+        run_user: str | None,
+        has_backup: bool,
+        config_content: str | None,
+        backup_config_content: str | None,
+        sync_status: str,
+        sync_error: str | None,
+    ) -> None:
+        """写入单服务详情同步快照，保持详情接口始终只查数据库。"""
+        safe_host = ensure_safe_host(host)
+        safe_program_name = ensure_safe_program_name(program_name)
+        current_sync_time = sync_time or datetime.now()
+        now_str = current_sync_time.strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET status = %s,
+                        pid = %s,
+                        uptime = %s,
+                        status_sync_time = %s,
+                        command = %s,
+                        directory = %s,
+                        stdout_logfile = %s,
+                        job_name = %s,
+                        module_name = %s,
+                        java_path = %s,
+                        active_profile = %s,
+                        port = %s,
+                        jar_name = %s,
+                        xms = %s,
+                        xmx = %s,
+                        run_user = %s,
+                        has_backup = %s,
+                        config_content = %s,
+                        backup_config_content = %s,
+                        last_sync_at = %s,
+                        sync_status = %s,
+                        sync_error = %s
+                    WHERE host_ip = %s AND program_name = %s
+                    """,
+                    (
+                        status,
+                        pid,
+                        uptime,
+                        now_str,
+                        command,
+                        directory,
+                        stdout_logfile,
+                        job_name,
+                        module_name,
+                        java_path,
+                        active_profile,
+                        port,
+                        jar_name,
+                        xms,
+                        xmx,
+                        run_user,
+                        int(has_backup),
+                        config_content,
+                        backup_config_content,
+                        now_str,
+                        sync_status,
+                        sync_error,
+                        safe_host,
+                        safe_program_name,
+                    ),
                 )
             connection.commit()
 
@@ -648,6 +753,15 @@ class SupervisorRegistryService:
             pid=None,
             uptime=None,
             status_sync_time=None,
+            command=None,
+            directory=None,
+            stdout_logfile=None,
+            has_backup=False,
+            config_content=None,
+            backup_config_content=None,
+            last_sync_at=None,
+            sync_status="UNKNOWN",
+            sync_error=None,
             is_archived=False,
             archived_at=None,
             restored_at=None,
@@ -680,6 +794,15 @@ class SupervisorRegistryService:
             pid=self._to_optional_str(row.get("pid")),
             uptime=self._to_optional_str(row.get("uptime")),
             status_sync_time=row.get("status_sync_time"),
+            command=self._to_optional_str(row.get("command")),
+            directory=self._to_optional_str(row.get("directory")),
+            stdout_logfile=self._to_optional_str(row.get("stdout_logfile")),
+            has_backup=bool(row.get("has_backup", 0)),
+            config_content=self._to_optional_str(row.get("config_content")),
+            backup_config_content=self._to_optional_str(row.get("backup_config_content")),
+            last_sync_at=row.get("last_sync_at"),
+            sync_status=str(row.get("sync_status", "UNKNOWN")),
+            sync_error=self._to_optional_str(row.get("sync_error")),
             is_archived=bool(row.get("is_archived", 0)),
             archived_at=row.get("archived_at"),
             restored_at=row.get("restored_at"),

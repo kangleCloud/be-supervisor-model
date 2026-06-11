@@ -225,6 +225,15 @@ class FakeMySQLServer:
                 "pid",
                 "uptime",
                 "status_sync_time",
+                "command",
+                "directory",
+                "stdout_logfile",
+                "has_backup",
+                "config_content",
+                "backup_config_content",
+                "last_sync_at",
+                "sync_status",
+                "sync_error",
                 "is_archived",
                 "archived_at",
                 "restored_at",
@@ -314,6 +323,15 @@ class FakeMySQLServer:
         pid: str | None = None,
         uptime: str | None = None,
         status_sync_time: str | None = None,
+        command: str | None = None,
+        directory: str | None = None,
+        stdout_logfile: str | None = None,
+        has_backup: bool = False,
+        config_content: str | None = None,
+        backup_config_content: str | None = None,
+        last_sync_at: str | None = None,
+        sync_status: str = "UNKNOWN",
+        sync_error: str | None = None,
         is_archived: bool = False,
         archived_at: str | None = None,
         restored_at: str | None = None,
@@ -352,6 +370,15 @@ class FakeMySQLServer:
                 pid=pid,
                 uptime=uptime,
                 status_sync_time=status_sync_time,
+                command=command,
+                directory=directory,
+                stdout_logfile=stdout_logfile,
+                has_backup=has_backup,
+                config_content=config_content,
+                backup_config_content=backup_config_content,
+                last_sync_at=last_sync_at,
+                sync_status=sync_status,
+                sync_error=sync_error,
                 is_archived=is_archived,
                 archived_at=archived_at,
                 restored_at=restored_at,
@@ -390,6 +417,15 @@ class FakeMySQLServer:
         pid: str | None = None,
         uptime: str | None = None,
         status_sync_time: str | None = None,
+        command: str | None = None,
+        directory: str | None = None,
+        stdout_logfile: str | None = None,
+        has_backup: bool = False,
+        config_content: str | None = None,
+        backup_config_content: str | None = None,
+        last_sync_at: str | None = None,
+        sync_status: str = "UNKNOWN",
+        sync_error: str | None = None,
         is_archived: bool = False,
         archived_at: str | None = None,
         restored_at: str | None = None,
@@ -419,6 +455,15 @@ class FakeMySQLServer:
             "pid": pid,
             "uptime": uptime,
             "status_sync_time": status_sync_time,
+            "command": command,
+            "directory": directory,
+            "stdout_logfile": stdout_logfile,
+            "has_backup": 1 if has_backup else 0,
+            "config_content": config_content,
+            "backup_config_content": backup_config_content,
+            "last_sync_at": last_sync_at,
+            "sync_status": sync_status,
+            "sync_error": sync_error,
             "is_archived": 1 if is_archived else 0,
             "archived_at": archived_at,
             "restored_at": restored_at,
@@ -442,6 +487,15 @@ class FakeMySQLServer:
         row.setdefault("pid", None)
         row.setdefault("uptime", None)
         row.setdefault("status_sync_time", None)
+        row.setdefault("command", None)
+        row.setdefault("directory", None)
+        row.setdefault("stdout_logfile", None)
+        row.setdefault("has_backup", 0)
+        row.setdefault("config_content", None)
+        row.setdefault("backup_config_content", None)
+        row.setdefault("last_sync_at", None)
+        row.setdefault("sync_status", "UNKNOWN")
+        row.setdefault("sync_error", None)
         row.setdefault("is_archived", 0)
         row.setdefault("archived_at", None)
         row.setdefault("restored_at", None)
@@ -527,6 +581,24 @@ class FakeMySQLServer:
                 columns.add("uptime")
             if "ADD COLUMN `status_sync_time`" in normalized:
                 columns.add("status_sync_time")
+            if "ADD COLUMN `command`" in normalized:
+                columns.add("command")
+            if "ADD COLUMN `directory`" in normalized:
+                columns.add("directory")
+            if "ADD COLUMN `stdout_logfile`" in normalized:
+                columns.add("stdout_logfile")
+            if "ADD COLUMN `has_backup`" in normalized:
+                columns.add("has_backup")
+            if "ADD COLUMN `config_content`" in normalized:
+                columns.add("config_content")
+            if "ADD COLUMN `backup_config_content`" in normalized:
+                columns.add("backup_config_content")
+            if "ADD COLUMN `last_sync_at`" in normalized:
+                columns.add("last_sync_at")
+            if "ADD COLUMN `sync_status`" in normalized:
+                columns.add("sync_status")
+            if "ADD COLUMN `sync_error`" in normalized:
+                columns.add("sync_error")
             if "ADD COLUMN `is_archived`" in normalized:
                 columns.add("is_archived")
             if "ADD COLUMN `archived_at`" in normalized:
@@ -852,6 +924,66 @@ class FakeMySQLServer:
                 rows = self._filter_supervisor_rows(rows, where_part, params)
             cursor.results = [{"cnt": len(rows)}]
             return len(rows)
+
+        if normalized.startswith(
+            "UPDATE sys_supervisor_service SET status = %s, pid = %s, uptime = %s, status_sync_time = %s, command = %s,"
+        ):
+            (
+                status,
+                pid,
+                uptime,
+                status_sync_time,
+                command,
+                directory,
+                stdout_logfile,
+                job_name,
+                module_name,
+                java_path,
+                active_profile,
+                port,
+                jar_name,
+                xms,
+                xmx,
+                run_user,
+                has_backup,
+                config_content,
+                backup_config_content,
+                last_sync_at,
+                sync_status,
+                sync_error,
+                host_ip,
+                program_name,
+            ) = params
+            updated = 0
+            for item in self.tables.get("sys_supervisor_service", []):
+                self._hydrate_supervisor_defaults(item)
+                if item["host_ip"] != host_ip or item["program_name"] != program_name:
+                    continue
+                item["status"] = str(status)
+                item["pid"] = str(pid) if pid is not None else None
+                item["uptime"] = str(uptime) if uptime is not None else None
+                item["status_sync_time"] = str(status_sync_time)
+                item["command"] = str(command) if command is not None else None
+                item["directory"] = str(directory) if directory is not None else None
+                item["stdout_logfile"] = str(stdout_logfile) if stdout_logfile is not None else None
+                item["job_name"] = str(job_name) if job_name is not None else None
+                item["module_name"] = str(module_name) if module_name is not None else None
+                item["java_path"] = str(java_path) if java_path is not None else None
+                item["active_profile"] = str(active_profile) if active_profile is not None else None
+                item["port"] = int(port) if port is not None else None
+                item["jar_name"] = str(jar_name) if jar_name is not None else None
+                item["xms"] = str(xms) if xms is not None else None
+                item["xmx"] = str(xmx) if xmx is not None else None
+                item["run_user"] = str(run_user) if run_user is not None else None
+                item["has_backup"] = int(has_backup)
+                item["config_content"] = str(config_content) if config_content is not None else None
+                item["backup_config_content"] = str(backup_config_content) if backup_config_content is not None else None
+                item["last_sync_at"] = str(last_sync_at)
+                item["sync_status"] = str(sync_status)
+                item["sync_error"] = str(sync_error) if sync_error is not None else None
+                updated += 1
+            cursor.rowcount = updated
+            return updated
 
         if normalized.startswith("UPDATE sys_supervisor_service SET status = %s,"):
             # batch_update_status: SET status, pid, uptime, status_sync_time WHERE host_ip = %s AND program_name = %s

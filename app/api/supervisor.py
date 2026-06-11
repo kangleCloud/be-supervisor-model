@@ -18,11 +18,13 @@ from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.port_check_service import PortCheckService
 from app.services.supervisor_archive_service import SupervisorArchiveService
+from app.services.supervisor_detail_service import SupervisorDetailService
 from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_manager import SupervisorManager
 from app.services.supervisor_registry_service import SupervisorRegistryService
 from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
+from app.services.supervisor_sync_service import SupervisorSyncService
 from app.services.template_service import TemplateService
 
 
@@ -43,8 +45,16 @@ def get_manager() -> SupervisorManager:
     supervisor_service = SupervisorService(host_service)
     registry_service = SupervisorRegistryService(settings)
     import_service = SupervisorImportService(host_service, config_file_service, template_service, registry_service)
+    detail_service = SupervisorDetailService(host_service, registry_service)
     runtime_service = SupervisorRuntimeService(host_service, registry_service, supervisor_service)
     archive_service = SupervisorArchiveService(host_service, config_file_service, registry_service, supervisor_service)
+    sync_service = SupervisorSyncService(
+        host_service,
+        config_file_service,
+        registry_service,
+        supervisor_service,
+        template_service,
+    )
     return SupervisorManager(
         host_service,
         template_service,
@@ -53,8 +63,10 @@ def get_manager() -> SupervisorManager:
         supervisor_service,
         registry_service,
         import_service,
+        detail_service,
         runtime_service,
         archive_service,
+        sync_service,
     )
 
 
@@ -85,7 +97,7 @@ def list_services(
 @router.get(
     "/services/{program_name}",
     summary="查询 Supervisor 服务详情",
-    description="返回数据库中的纳管配置、模板基线或导入快照内容，以及按 configPath 读取到的远端文件状态。",
+    description="只返回数据库中的单服务详情快照，不会隐式读取远端 .ini、.bak，也不会执行 supervisorctl status。",
     response_description="服务详情。",
 )
 def get_service_detail(
@@ -94,6 +106,21 @@ def get_service_detail(
     manager: SupervisorManager = Depends(get_manager),
 ):
     return ok(manager.get_service_detail(host, program_name), msg="查询服务详情成功")
+
+
+@router.post(
+    "/services/{program_name}/sync",
+    summary="同步单个 Supervisor 服务详情快照",
+    description="按数据库中的 programName 和 configPath 显式读取远端 supervisorctl status、当前 .ini 与可选 .bak，并把结果回写数据库详情快照。",
+    response_description="同步结果。",
+)
+def sync_service_detail(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.sync_service_detail(host, program_name, current_user), msg="同步服务详情成功")
 
 
 @router.post(

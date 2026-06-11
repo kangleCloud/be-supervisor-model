@@ -152,13 +152,23 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert detail_response.status_code == 200
     detail_data = detail_response.json()["data"]
     assert detail_data["id"] == create_data["id"]
+    assert detail_data["host"] == "127.0.0.1"
+    assert detail_data["hostName"] == "local"
     assert detail_data["jobName"] == "demo-project"
     assert detail_data["moduleName"] == "member"
     assert detail_data["configPath"] == "demo-project_member.ini"
-    assert detail_data["fileName"] == "demo-project_member.ini"
-    assert detail_data["contentProgramName"] == "demo-project_member"
-    assert detail_data["fileState"] == "MATCH"
-    assert "[program:demo-project_member]" in detail_data["expectedContent"]
+    assert detail_data["configName"] == "demo-project_member.ini"
+    assert detail_data["status"] == "UNKNOWN"
+    assert detail_data["pid"] is None
+    assert detail_data["uptime"] is None
+    assert detail_data["hasBackup"] is False
+    assert detail_data["configContent"] is None
+    assert detail_data["backupConfigContent"] is None
+    assert detail_data["syncStatus"] == "UNKNOWN"
+    assert detail_data["syncError"] is None
+    assert "expectedContent" not in detail_data
+    assert "remoteContent" not in detail_data
+    assert "fileState" not in detail_data
 
 
 def test_api_list_uses_database_as_source(client, test_environment, seed_user):
@@ -178,101 +188,112 @@ def test_api_list_uses_database_as_source(client, test_environment, seed_user):
     assert data["pages"] == 0
 
 
-def test_api_reports_missing_remote_file(client, test_environment, seed_user):
+def test_api_detail_uses_database_only(client, test_environment, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+
+    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+
+    from app.services.config_file_service import ConfigFileService
+    from app.services.supervisor_service import SupervisorService
+
+    monkeypatch.setattr(
+        ConfigFileService,
+        "read_raw_config_optional_by_config_path",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("详情接口不应读取远端配置")),
+    )
+    monkeypatch.setattr(
+        SupervisorService,
+        "status",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("详情接口不应执行 supervisorctl status")),
+    )
+
+    response = client.get(
+        "/admin/api/supervisor/services/demo-project_member",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["programName"] == "demo-project_member"
+
+
+def test_api_sync_service_updates_database_snapshot(client, test_environment, seed_user, fake_supervisor):
+    seed_user()
+    headers = _login_headers(client)
+
+    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+    fake_supervisor.states["demo-project_member"] = "RUNNING"
+
+    sync_response = client.post(
+        "/admin/api/supervisor/services/demo-project_member/sync",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert sync_response.status_code == 200
+    sync_data = sync_response.json()["data"]
+    assert sync_data["status"] == "RUNNING"
+    assert sync_data["pid"] == "1"
+    assert sync_data["uptime"] == "0:00:10"
+    assert sync_data["syncStatus"] == "SUCCESS"
+    assert sync_data["syncError"] is None
+    assert "configContent" in sync_data["syncedFields"]
+    assert "command" in sync_data["syncedFields"]
+    assert sync_data["warnings"] == []
+    assert sync_data["commandResults"]["status"]["ok"] is True
+    assert sync_data["commandResults"]["config"]["exists"] is True
+    assert sync_data["commandResults"]["backup"]["exists"] is False
+
+    detail_response = client.get(
+        "/admin/api/supervisor/services/demo-project_member",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert detail_response.status_code == 200
+    detail_data = detail_response.json()["data"]
+    assert detail_data["status"] == "RUNNING"
+    assert detail_data["pid"] == "1"
+    assert detail_data["uptime"] == "0:00:10"
+    assert detail_data["hasBackup"] is False
+    assert detail_data["syncStatus"] == "SUCCESS"
+    assert detail_data["syncError"] is None
+    assert detail_data["command"].startswith("/usr/local/jdk17/bin/java")
+    assert detail_data["directory"] == "/data/content/demo-project/member"
+    assert detail_data["stdoutLogfile"] == "/data/logs/demo-project/demo-project-member.log"
+    assert "[program:demo-project_member]" in detail_data["configContent"]
+    assert detail_data["backupConfigContent"] is None
+    assert detail_data["lastSyncAt"] is not None
+
+
+def test_api_sync_service_marks_failed_when_config_missing(client, test_environment, seed_user):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
-
     client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
     (conf_dir / "demo-project_member.ini").unlink()
 
-    response = client.get(
+    response = client.post(
+        "/admin/api/supervisor/services/demo-project_member/sync",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["syncStatus"] == "FAILED"
+    assert "当前配置文件不存在" in data["syncError"]
+    assert any("当前配置文件不存在" in item for item in data["warnings"])
+
+    detail_response = client.get(
         "/admin/api/supervisor/services/demo-project_member",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
-
-    assert response.status_code == 200
-    assert response.json()["data"]["fileState"] == "MISSING"
-
-
-def test_api_reports_remote_content_mismatch(client, test_environment, seed_user):
-    seed_user()
-    headers = _login_headers(client)
-    conf_dir = test_environment["conf_dir"]
-
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
-    (conf_dir / "demo-project_member.ini").write_text(
-        test_environment["build_ini"]("demo-project_member", 9010, job_name="demo-project", module_name="member"),
-        encoding="utf-8",
-    )
-
-    response = client.get(
-        "/admin/api/supervisor/services/demo-project_member",
-        params={"host": "127.0.0.1"},
-        headers=headers,
-    )
-
-    assert response.status_code == 200
-    detail_data = response.json()["data"]
-    assert detail_data["fileState"] == "MISMATCH"
-    assert "9010" in detail_data["remoteContent"]
-
-
-def test_api_imported_readonly_detail_uses_baseline_content(client, test_environment, seed_user, fake_mysql):
-    seed_user()
-    headers = _login_headers(client)
-    conf_dir = test_environment["conf_dir"]
-    sub_dir = conf_dir / "saas"
-    sub_dir.mkdir()
-    baseline_content = (
-        "[program:legacy_sjfy-admin]\n"
-        "command=/usr/local/jdk17/bin/java -jar -Xms256m -Xmx512m "
-        "-Dspring.profiles.active=prod -Dserver.port=9200 /data/content/legacy/sjfy-admin.jar\n"
-        "directory=/data/content/legacy\n"
-        "stdout_logfile_maxbytes=50MB\n"
-        "stdout_logfile_maxbytes=1GB\n"
-    )
-    (sub_dir / "legacy-name.ini").write_text(baseline_content, encoding="utf-8")
-    fake_mysql.seed_supervisor_service(
-        host_ip="127.0.0.1",
-        job_name="legacy",
-        module_name="sjfy-admin",
-        program_name="legacy_sjfy-admin",
-        config_name="legacy-name.ini",
-        config_path="saas/legacy-name.ini",
-        file_name="legacy-name.ini",
-        content_program_name="legacy_sjfy-admin",
-        manage_mode="IMPORTED_READONLY",
-        baseline_content=baseline_content,
-        metadata_complete=False,
-        parse_warnings='["section[program:legacy_sjfy-admin] 存在重复 key: stdout_logfile_maxbytes，已按最后一个值生效"]',
-        java_path="/usr/local/jdk17/bin/java",
-        active_profile="prod",
-        port=9200,
-        jar_name="sjfy-admin.jar",
-        xms="256m",
-        xmx="512m",
-        run_user=None,
-    )
-
-    response = client.get(
-        "/admin/api/supervisor/services/legacy_sjfy-admin",
-        params={"host": "127.0.0.1"},
-        headers=headers,
-    )
-
-    assert response.status_code == 200
-    detail_data = response.json()["data"]
-    assert detail_data["configName"] == "legacy-name.ini"
-    assert detail_data["configPath"] == "saas/legacy-name.ini"
-    assert detail_data["fileName"] == "legacy-name.ini"
-    assert detail_data["contentProgramName"] == "legacy_sjfy-admin"
-    assert detail_data["manageMode"] == "IMPORTED_READONLY"
-    assert detail_data["metadataComplete"] is False
-    assert len(detail_data["parseWarnings"]) == 1
-    assert detail_data["expectedContent"] == baseline_content
-    assert detail_data["fileState"] == "MATCH"
+    assert detail_response.status_code == 200
+    detail_data = detail_response.json()["data"]
+    assert detail_data["syncStatus"] == "FAILED"
+    assert "当前配置文件不存在" in detail_data["syncError"]
+    assert detail_data["configContent"] is None
 
 
 def test_api_imports_dry_run_returns_planned_items(client, test_environment, seed_user, fake_mysql):
@@ -1030,7 +1051,32 @@ def test_api_detail_returns_archive_fields(client, seed_user, fake_mysql):
     assert data["isArchived"] is True
     assert data["archivedAt"] == "2026-06-10 10:00:00"
     assert data["restoredAt"] == "2026-06-10 12:00:00"
-    assert data["fileState"] == "MISSING"
+    assert data["syncStatus"] == "UNKNOWN"
+    assert "fileState" not in data
+
+
+def test_api_sync_rejects_archived_service(client, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="legacy",
+        module_name="svc",
+        program_name="legacy_svc",
+        config_name="legacy.ini",
+        config_path="legacy.ini",
+        file_name="legacy.ini",
+        is_archived=True,
+    )
+
+    response = client.post(
+        "/admin/api/supervisor/services/legacy_svc/sync",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == 40920
 
 
 def test_api_runtime_actions_allow_ansible_and_update_snapshot(

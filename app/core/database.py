@@ -23,6 +23,8 @@ LEGACY_RUNTIME_MIGRATION_VERSION = 2
 LEGACY_RUNTIME_MIGRATION_NAME = "002_add_supervisor_service_runtime_columns.sql"
 LEGACY_ARCHIVE_MIGRATION_VERSION = 3
 LEGACY_ARCHIVE_MIGRATION_NAME = "003_add_supervisor_archive_columns.sql"
+LEGACY_DETAIL_SYNC_MIGRATION_VERSION = 4
+LEGACY_DETAIL_SYNC_MIGRATION_NAME = "004_add_supervisor_detail_sync_columns.sql"
 SUPERVISOR_SERVICE_TABLE = "sys_supervisor_service"
 SUPERVISOR_RUNTIME_COLUMNS: tuple[tuple[str, str], ...] = (
     (
@@ -76,6 +78,62 @@ SUPERVISOR_ARCHIVE_INDEXES: tuple[tuple[str, str], ...] = (
     (
         "idx_supervisor_host_archived",
         "ALTER TABLE `sys_supervisor_service` ADD KEY `idx_supervisor_host_archived` (`host_ip`, `is_archived`)",
+    ),
+)
+SUPERVISOR_DETAIL_SYNC_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "command",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `command` VARCHAR(2000) DEFAULT NULL COMMENT '最近同步到的 command 原文' "
+        "AFTER `status_sync_time`",
+    ),
+    (
+        "directory",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `directory` VARCHAR(1000) DEFAULT NULL COMMENT '最近同步到的工作目录' "
+        "AFTER `command`",
+    ),
+    (
+        "stdout_logfile",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `stdout_logfile` VARCHAR(1000) DEFAULT NULL COMMENT '最近同步到的 stdout_logfile' "
+        "AFTER `directory`",
+    ),
+    (
+        "has_backup",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `has_backup` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '当前配置是否存在 .bak 备份' "
+        "AFTER `stdout_logfile`",
+    ),
+    (
+        "config_content",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `config_content` MEDIUMTEXT DEFAULT NULL COMMENT '最近同步到的当前配置原文' "
+        "AFTER `has_backup`",
+    ),
+    (
+        "backup_config_content",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `backup_config_content` MEDIUMTEXT DEFAULT NULL COMMENT '最近同步到的备份配置原文' "
+        "AFTER `config_content`",
+    ),
+    (
+        "last_sync_at",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `last_sync_at` DATETIME DEFAULT NULL COMMENT '最近执行详情同步时间' "
+        "AFTER `backup_config_content`",
+    ),
+    (
+        "sync_status",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `sync_status` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN' COMMENT '详情同步状态：SUCCESS/FAILED/UNKNOWN' "
+        "AFTER `last_sync_at`",
+    ),
+    (
+        "sync_error",
+        "ALTER TABLE `sys_supervisor_service` "
+        "ADD COLUMN `sync_error` VARCHAR(1000) DEFAULT NULL COMMENT '最近一次详情同步错误摘要' "
+        "AFTER `sync_status`",
     ),
 )
 
@@ -195,6 +253,9 @@ def _apply_migration(cursor: Cursor, settings: Settings, version: int, migration
     if version == LEGACY_ARCHIVE_MIGRATION_VERSION and migration_path.name == LEGACY_ARCHIVE_MIGRATION_NAME:
         _apply_supervisor_archive_columns_migration(cursor, settings.database.database)
         return
+    if version == LEGACY_DETAIL_SYNC_MIGRATION_VERSION and migration_path.name == LEGACY_DETAIL_SYNC_MIGRATION_NAME:
+        _apply_supervisor_detail_sync_columns_migration(cursor, settings.database.database)
+        return
     _execute_script(cursor, migration_path.read_text(encoding="utf-8"))
 
 
@@ -226,6 +287,17 @@ def _apply_supervisor_archive_columns_migration(cursor: Cursor, database_name: s
 
     for index_name, statement in SUPERVISOR_ARCHIVE_INDEXES:
         if _index_exists(cursor, SUPERVISOR_SERVICE_TABLE, index_name):
+            continue
+        cursor.execute(statement)
+
+
+def _apply_supervisor_detail_sync_columns_migration(cursor: Cursor, database_name: str) -> None:
+    """仅在旧库缺少详情同步字段时补建，避免新库重复 ADD COLUMN。"""
+    if not _table_exists(cursor, SUPERVISOR_SERVICE_TABLE):
+        return
+
+    for column_name, statement in SUPERVISOR_DETAIL_SYNC_COLUMNS:
+        if _column_exists(cursor, database_name, SUPERVISOR_SERVICE_TABLE, column_name):
             continue
         cursor.execute(statement)
 

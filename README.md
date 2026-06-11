@@ -5,9 +5,9 @@
 当前版本包含两类能力：
 
 - 登录鉴权：登录、查询当前用户、退出登录
-- Supervisor 管理：查询主机、查询纳管服务、查询服务详情、执行初始化导入、启动/停止/重启、归档/还原，并仅对本地主机新增服务
+- Supervisor 管理：查询主机、分页查询纳管服务、查询服务详情、同步单服务远端快照、执行初始化导入、启动/停止/重启、归档/还原，并仅对本地主机新增服务
 
-Supervisor 配置主数据落在 MySQL 8 的 `sys_supervisor_service` 表中；远端 `/etc/supervisord.d` 及其子目录中的 `*.ini` 是实际生效结果；运行状态实时来自 `supervisorctl status`。
+Supervisor 配置主数据落在 MySQL 8 的 `sys_supervisor_service` 表中；远端 `/etc/supervisord.d` 及其子目录中的 `*.ini` 是实际生效结果；详情和列表默认只读数据库，远端状态与配置快照通过显式同步接口或批量状态刷新接口写回数据库。
 
 ## 技术栈
 
@@ -150,6 +150,7 @@ cp .env.example .env.prod
 - 新库会先执行 `app/database/migrations/001_init_schema.sql` 完整基线初始化 SQL
 - 如果检测到历史库缺少 `sys_supervisor_service` 的运行时字段，会再执行 `002_add_supervisor_service_runtime_columns.sql` 做兼容补齐
 - 如果检测到历史库缺少 `sys_supervisor_service` 的归档字段，会再执行 `003_add_supervisor_archive_columns.sql` 做兼容补齐
+- 如果检测到历史库缺少单服务详情同步字段，会再执行 `004_add_supervisor_detail_sync_columns.sql` 做兼容补齐
 - 会自动初始化一条超级管理员账号：`admin / Admin@123456`
 - 其他账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
 
@@ -190,6 +191,8 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 服务列表与运行操作规则：
 
 - `GET /admin/api/supervisor/services` 新增 `archived=false|true|all` 查询参数，默认 `false`
+- `GET /admin/api/supervisor/services/{programName}` 只返回数据库快照，不隐式读取远端 `.ini/.bak` 或执行 `supervisorctl status`
+- `POST /admin/api/supervisor/services/{programName}/sync` 才会显式读取远端状态、当前配置和可选备份，并把结果回写数据库
 - 归档后的服务仍可查看详情，但 `start/stop/restart` 会被后端直接拒绝
 - `POST /admin/api/supervisor/services/{programName}/archive` 会先 `stop`，再备份、删除 `.ini` 并执行 `reread/update`
 - `POST /admin/api/supervisor/services/{programName}/restore` 只恢复配置并执行 `reread/update`，不会自动启动
@@ -223,6 +226,7 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 - 本次 Supervisor 导入初始化 API 约定见 [docs/07.Supervisor导入初始化API约定.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/07.Supervisor导入初始化API约定.md)
 - 本次 Ansible 输出兼容与告警治理见 [docs/08.Ansible输出兼容与告警治理.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/08.Ansible输出兼容与告警治理.md)
 - 本次 Supervisor 归档与运行操作联动见 [docs/09.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor归档与运行操作联动说明.md)
+- 本次 Supervisor 详情数据库化与单服务同步见 [docs/10.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor详情数据库化与单服务同步说明.md)
 
 ## 启动方式
 
@@ -256,7 +260,8 @@ pip install -r requirements.txt
 - `GET /admin/api/supervisor/hosts`
 - `POST /admin/api/supervisor/imports`
 - `GET /admin/api/supervisor/services?host=&keyword=&status=&archived=&page=&pageSize=`（分页查询，纯数据库，不触发远端命令；默认 `archived=false`）
-- `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`（详情，实时读取远端状态与文件）
+- `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`（详情，纯数据库快照）
+- `POST /admin/api/supervisor/services/{programName}/sync?host=127.0.0.1`（显式同步远端状态与配置快照）
 - `POST /admin/api/supervisor/services`（仅限 local 主机新增）
 - `POST /admin/api/supervisor/services/{programName}/start?host=10.1.0.104`
 - `POST /admin/api/supervisor/services/{programName}/stop?host=10.1.0.104`
@@ -332,5 +337,12 @@ curl 'http://127.0.0.1:18880/admin/api/supervisor/services?host=127.0.0.1' \
 
 ```bash
 curl 'http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member?host=127.0.0.1' \
+  -H 'Authorization: Bearer <access-token>'
+```
+
+同步单服务详情快照：
+
+```bash
+curl -X POST 'http://127.0.0.1:18880/admin/api/supervisor/services/demo-project_member/sync?host=127.0.0.1' \
   -H 'Authorization: Bearer <access-token>'
 ```

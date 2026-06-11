@@ -50,11 +50,20 @@ class SupervisorService:
 
     def status(self, host: str, program_name: Optional[str] = None) -> list[SupervisorStatus]:
         """查询服务状态。"""
+        statuses, _ = self.status_with_result(host, program_name)
+        return statuses
+
+    def status_with_result(
+        self,
+        host: str,
+        program_name: Optional[str] = None,
+    ) -> tuple[list[SupervisorStatus], dict[str, object]]:
+        """查询服务状态，并返回原始命令执行结果供同步接口记录。"""
         command = ["supervisorctl", "status"]
         if program_name:
             command.append(ensure_safe_program_name(program_name))
         result = self._run(host, command, allow_non_zero=bool(program_name))
-        return self._parse_status_output(result.stdout)
+        return self._parse_status_output(result.stdout), self._command_result_payload(result)
 
     def start(self, host: str, program_name: str) -> dict[str, object]:
         """启动服务。"""

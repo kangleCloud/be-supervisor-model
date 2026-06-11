@@ -15,7 +15,7 @@ def test_database_initialization_is_idempotent(settings, fake_mysql):
     assert "sys_login_log" in fake_mysql.tables
     assert "sys_login_token" in fake_mysql.tables
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
 
 
 def test_database_bootstraps_single_super_admin(settings, fake_mysql):
@@ -38,7 +38,7 @@ def test_database_recreates_missing_auth_tables(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_login_token" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
 
 
 def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
@@ -50,7 +50,7 @@ def test_database_recreates_missing_supervisor_table(settings, fake_mysql):
     initialize_database(settings)
 
     assert "sys_supervisor_service" in fake_mysql.tables
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
 
 
 def test_database_upgrades_legacy_supervisor_table_runtime_columns(settings, fake_mysql):
@@ -101,7 +101,7 @@ def test_database_upgrades_legacy_supervisor_table_runtime_columns(settings, fak
 
     initialize_database(settings)
 
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
     assert {"status", "pid", "uptime", "status_sync_time"} <= fake_mysql.table_columns["sys_supervisor_service"]
     assert "idx_supervisor_host_status" in fake_mysql.table_indexes["sys_supervisor_service"]
 
@@ -162,9 +162,84 @@ def test_database_upgrades_legacy_supervisor_table_archive_columns(settings, fak
 
     initialize_database(settings)
 
-    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3]
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
     assert {"is_archived", "archived_at", "restored_at"} <= fake_mysql.table_columns["sys_supervisor_service"]
     assert "idx_supervisor_host_archived" in fake_mysql.table_indexes["sys_supervisor_service"]
+
+
+def test_database_upgrades_legacy_supervisor_table_detail_sync_columns(settings, fake_mysql):
+    """旧库只有前三版结构时，004 需要按缺列状态安全补齐详情同步字段。"""
+    fake_mysql.databases.add(settings.database.database)
+    fake_mysql.tables["sys_user"] = []
+    fake_mysql.tables["sys_login_log"] = []
+    fake_mysql.tables["sys_login_token"] = []
+    fake_mysql.tables["sys_supervisor_service"] = []
+    fake_mysql.tables["sys_schema_migration"] = [
+        {"version": 1, "name": "001_init_schema.sql"},
+        {"version": 2, "name": "002_add_supervisor_service_runtime_columns.sql"},
+        {"version": 3, "name": "003_add_supervisor_archive_columns.sql"},
+    ]
+    fake_mysql.set_table_schema(
+        "sys_supervisor_service",
+        columns={
+            "id",
+            "host_ip",
+            "config_path",
+            "file_name",
+            "content_program_name",
+            "manage_mode",
+            "baseline_content",
+            "metadata_complete",
+            "parse_warnings",
+            "job_name",
+            "module_name",
+            "program_name",
+            "config_name",
+            "java_path",
+            "active_profile",
+            "port",
+            "jar_name",
+            "xms",
+            "xmx",
+            "run_user",
+            "status",
+            "pid",
+            "uptime",
+            "status_sync_time",
+            "is_archived",
+            "archived_at",
+            "restored_at",
+            "create_time",
+            "update_time",
+            "create_by_id",
+            "create_by",
+            "update_by_id",
+            "update_by",
+            "remark",
+        },
+        indexes={
+            "uk_supervisor_host_config_path",
+            "idx_supervisor_host_program",
+            "idx_supervisor_host_manage_mode",
+            "idx_supervisor_host_status",
+            "idx_supervisor_host_archived",
+        },
+    )
+
+    initialize_database(settings)
+
+    assert sorted(row["version"] for row in fake_mysql.tables["sys_schema_migration"]) == [1, 2, 3, 4]
+    assert {
+        "command",
+        "directory",
+        "stdout_logfile",
+        "has_backup",
+        "config_content",
+        "backup_config_content",
+        "last_sync_at",
+        "sync_status",
+        "sync_error",
+    } <= fake_mysql.table_columns["sys_supervisor_service"]
 
 
 def test_login_persists_token_and_log(client, seed_user, fake_mysql):
@@ -216,6 +291,15 @@ def test_init_schema_sql_contains_final_supervisor_service_schema():
     assert "`baseline_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
     assert "`metadata_complete` TINYINT(1) NOT NULL DEFAULT 1" in migration_sql
     assert "`parse_warnings` TEXT DEFAULT NULL" in migration_sql
+    assert "`command` VARCHAR(2000) DEFAULT NULL" in migration_sql
+    assert "`directory` VARCHAR(1000) DEFAULT NULL" in migration_sql
+    assert "`stdout_logfile` VARCHAR(1000) DEFAULT NULL" in migration_sql
+    assert "`has_backup` TINYINT(1) NOT NULL DEFAULT 0" in migration_sql
+    assert "`config_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
+    assert "`backup_config_content` MEDIUMTEXT DEFAULT NULL" in migration_sql
+    assert "`last_sync_at` DATETIME DEFAULT NULL" in migration_sql
+    assert "`sync_status` VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN'" in migration_sql
+    assert "`sync_error` VARCHAR(1000) DEFAULT NULL" in migration_sql
     assert "`is_archived` TINYINT(1) NOT NULL DEFAULT 0" in migration_sql
     assert "`archived_at` DATETIME DEFAULT NULL" in migration_sql
     assert "`restored_at` DATETIME DEFAULT NULL" in migration_sql

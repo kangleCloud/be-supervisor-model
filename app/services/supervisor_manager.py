@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from app.core.exceptions import AppError, InternalError, ParamError
+from app.core.exceptions import AppError, InternalError
 from app.schemas.supervisor import (
     PagedServiceResponse,
     ServiceCreateRequest,
@@ -18,8 +18,8 @@ from app.services.host_service import HostService
 from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.port_check_service import PortCheckService
+from app.services.supervisor_detail_service import SupervisorDetailService
 from app.services.supervisor_registry_service import (
-    MANAGE_MODE_IMPORTED_READONLY,
     MANAGE_MODE_TEMPLATE_MANAGED,
     SupervisorRegistryCreateData,
     SupervisorRegistryRecord,
@@ -27,13 +27,12 @@ from app.services.supervisor_registry_service import (
 )
 from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
+from app.services.supervisor_sync_service import SupervisorSyncService
 from app.services.template_service import TemplateService
 
 
 LOGGER = logging.getLogger(__name__)
 FILE_STATE_MATCH = "MATCH"
-FILE_STATE_MISSING = "MISSING"
-FILE_STATE_MISMATCH = "MISMATCH"
 
 
 def _format_datetime_text(value: object) -> str | None:
@@ -57,8 +56,10 @@ class SupervisorManager:
         supervisor_service: SupervisorService,
         registry_service: SupervisorRegistryService,
         import_service: SupervisorImportService,
+        detail_service: SupervisorDetailService,
         runtime_service: SupervisorRuntimeService,
         archive_service: SupervisorArchiveService,
+        sync_service: SupervisorSyncService,
     ):
         self.host_service = host_service
         self.template_service = template_service
@@ -67,8 +68,10 @@ class SupervisorManager:
         self.supervisor_service = supervisor_service
         self.registry_service = registry_service
         self.import_service = import_service
+        self.detail_service = detail_service
         self.runtime_service = runtime_service
         self.archive_orchestrator = archive_service
+        self.sync_service = sync_service
 
     def list_hosts(self) -> list[dict[str, object]]:
         """返回允许的主机列表。"""
@@ -98,19 +101,8 @@ class SupervisorManager:
         return result.model_dump(by_alias=True)
 
     def get_service_detail(self, host: str, program_name: str) -> dict[str, object]:
-        """返回纳管服务详情、期望配置与远端漂移信息。"""
-        self.host_service.get_host(host)
-        record = self.registry_service.get_by_program_name(host, program_name)
-        expected_content = self._render_expected_content(record)
-        remote_config = self.config_file_service.read_raw_config_optional_by_config_path(host, record.config_path)
-        status_entries = self.supervisor_service.status(host, record.program_name)
-        status = status_entries[0].to_dict() if status_entries else None
-        file_state = self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
-        payload = self._build_service_payload(record, status=status, file_state=file_state)
-        payload["expectedContent"] = expected_content
-        if file_state == FILE_STATE_MISMATCH and remote_config is not None:
-            payload["remoteContent"] = remote_config.content
-        return payload
+        """详情默认只读数据库快照，不隐式触发远端同步。"""
+        return self.detail_service.get_service_detail(host, program_name)
 
     def create_service(self, payload: ServiceCreateRequest, current_user) -> dict[str, object]:
         """新增服务并在远端和数据库中同步落地。"""
@@ -196,6 +188,10 @@ class SupervisorManager:
         )
         return report.to_dict()
 
+    def sync_service_detail(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """显式同步单服务远端状态与配置快照。"""
+        return self.sync_service.sync_service(host, program_name)
+
     def start_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
         """启动单个服务并刷新数据库状态快照。"""
         return self.runtime_service.start_service(host, program_name)
@@ -225,53 +221,6 @@ class SupervisorManager:
             operator_id=current_user.user_id,
             operator_name=current_user.username,
         )
-
-    def _render_expected_content(self, record: SupervisorRegistryRecord) -> str:
-        """详情与漂移判断要区分模板纳管与只读导入快照。"""
-        if record.manage_mode == MANAGE_MODE_IMPORTED_READONLY:
-            return record.baseline_content
-
-        if any(
-            value in (None, "")
-            for value in (
-                record.job_name,
-                record.module_name,
-                record.java_path,
-                record.active_profile,
-                record.port,
-                record.jar_name,
-                record.xms,
-                record.xmx,
-                record.run_user,
-            )
-        ):
-            return record.baseline_content
-
-        rendered = self.template_service.render_service(
-            job_name=str(record.job_name),
-            module_name=str(record.module_name),
-            java_path=str(record.java_path),
-            active=str(record.active_profile),
-            port=int(record.port),
-            jar_name=str(record.jar_name),
-            config_name=record.config_name,
-            xms=str(record.xms),
-            xmx=str(record.xmx),
-            user=str(record.run_user),
-        )
-        return rendered.content
-
-    def _detect_file_state(self, host: str, record: SupervisorRegistryRecord, expected_content: str) -> str:
-        remote_config = self.config_file_service.read_raw_config_optional_by_config_path(host, record.config_path)
-        return self._resolve_file_state(expected_content, remote_config.content if remote_config else None)
-
-    @staticmethod
-    def _resolve_file_state(expected_content: str, remote_content: str | None) -> str:
-        if remote_content is None:
-            return FILE_STATE_MISSING
-        if remote_content == expected_content:
-            return FILE_STATE_MATCH
-        return FILE_STATE_MISMATCH
 
     def _rollback_remote_create(self, host: str, config_name: str, program_name: str) -> dict[str, object]:
         """落库失败时立即删除刚写入的配置，并执行 reread/update 回滚现场。"""

@@ -85,6 +85,13 @@ class ArchiveStateError(AppError):
         super().__init__(409, 40911, msg, data)
 
 
+class ArchivedServiceSyncError(AppError):
+    """归档服务禁止执行详情同步。"""
+
+    def __init__(self, msg: str = "服务已归档，不能同步远端运行信息", data: Any = None):
+        super().__init__(409, 40920, msg, data)
+
+
 class InternalError(AppError):
     """内部错误。"""
 
