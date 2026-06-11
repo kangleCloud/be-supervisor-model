@@ -20,11 +20,31 @@ def test_port_check_scans_backups_and_excludes_current(settings, test_environmen
     host_service = HostService(settings)
     template_service = TemplateService(settings)
     config_service = ConfigFileService(settings, host_service, template_service)
-    port_service = PortCheckService(config_service)
+    port_service = PortCheckService(config_service, host_service)
 
-    conflicts = port_service.find_conflicts("127.0.0.1", 9001)
-    excluded = port_service.find_conflicts("127.0.0.1", 9001, exclude_config="demo_member.ini")
+    conflicts = port_service.find_conflicts("127.0.0.1", 9001, include_runtime=False)
+    excluded = port_service.find_conflicts(
+        "127.0.0.1",
+        9001,
+        exclude_config_path="demo_member.ini",
+        include_runtime=False,
+    )
 
     assert len(conflicts) == 3
     assert len(excluded) == 1
     assert excluded[0].program_name == "other_member"
+
+
+def test_port_check_detects_runtime_listeners(settings, test_environment, fake_supervisor):
+    host_service = HostService(settings)
+    template_service = TemplateService(settings)
+    config_service = ConfigFileService(settings, host_service, template_service)
+    port_service = PortCheckService(config_service, host_service)
+
+    fake_supervisor.extra_listeners[9909] = "external-java"
+
+    conflicts = port_service.find_conflicts("127.0.0.1", 9909)
+
+    assert len(conflicts) == 1
+    assert conflicts[0].kind == "LISTEN"
+    assert conflicts[0].source == "ss -lnutp"

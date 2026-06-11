@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 
-from app.core.exceptions import AppError, InternalError
+from app.core.exceptions import AppError
 from app.schemas.supervisor import (
     PagedServiceResponse,
     ServiceCreateRequest,
+    ServiceUpdateRequest,
     ServiceListQuery,
     ServiceListRecord,
     StatusRefreshResponse,
@@ -20,11 +21,10 @@ from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.port_check_service import PortCheckService
 from app.services.supervisor_detail_service import SupervisorDetailService
 from app.services.supervisor_registry_service import (
-    MANAGE_MODE_TEMPLATE_MANAGED,
-    SupervisorRegistryCreateData,
     SupervisorRegistryRecord,
     SupervisorRegistryService,
 )
+from app.services.supervisor_mutation_service import SupervisorMutationService
 from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
 from app.services.supervisor_sync_service import SupervisorSyncService
@@ -57,6 +57,7 @@ class SupervisorManager:
         registry_service: SupervisorRegistryService,
         import_service: SupervisorImportService,
         detail_service: SupervisorDetailService,
+        mutation_service: SupervisorMutationService,
         runtime_service: SupervisorRuntimeService,
         archive_service: SupervisorArchiveService,
         sync_service: SupervisorSyncService,
@@ -69,6 +70,7 @@ class SupervisorManager:
         self.registry_service = registry_service
         self.import_service = import_service
         self.detail_service = detail_service
+        self.mutation_service = mutation_service
         self.runtime_service = runtime_service
         self.archive_orchestrator = archive_service
         self.sync_service = sync_service
@@ -106,54 +108,21 @@ class SupervisorManager:
 
     def create_service(self, payload: ServiceCreateRequest, current_user) -> dict[str, object]:
         """新增服务并在远端和数据库中同步落地。"""
-        # 当前项目已收紧约束：远端 ansible 主机只允许读，新增只能发生在 local 主机。
-        self.host_service.ensure_mutation_allowed(payload.host, "当前项目禁止修改远端配置文件")
-        rendered = self.template_service.render(payload)
-        registry_data = SupervisorRegistryCreateData(
-            host_ip=payload.host,
-            job_name=payload.job_name,
-            module_name=payload.module_name,
-            program_name=rendered.program_name,
-            config_name=rendered.config_name,
-            config_path=rendered.config_name,
-            file_name=rendered.config_name,
-            content_program_name=rendered.program_name,
-            manage_mode=MANAGE_MODE_TEMPLATE_MANAGED,
-            baseline_content=rendered.content,
-            metadata_complete=True,
-            parse_warnings=(),
-            java_path=payload.java_path,
-            active_profile=payload.active,
-            port=payload.port,
-            jar_name=payload.jar_name or self.template_service.build_default_jar_name(payload.module_name),
-            xms=payload.xms,
-            xmx=payload.xmx,
-            run_user=payload.user,
-        )
-        self.registry_service.ensure_can_create(registry_data)
-        self.config_file_service.ensure_not_exists(payload.host, rendered.config_name, rendered.program_name)
-        self.port_check_service.ensure_no_conflict(payload.host, payload.port)
+        return self.mutation_service.create_service(payload, current_user)
 
-        self.config_file_service.write_config(payload.host, rendered.config_name, rendered.content, rendered.program_name)
-        self.supervisor_service.reread(payload.host)
-        self.supervisor_service.update(payload.host)
+    def update_service(
+        self,
+        host: str,
+        program_name: str,
+        payload: ServiceUpdateRequest,
+        current_user: AuthenticatedUser,
+    ) -> dict[str, object]:
+        """修改单个服务。"""
+        return self.mutation_service.update_service(host, program_name, payload, current_user)
 
-        try:
-            record = self.registry_service.create(
-                registry_data,
-                operator_id=current_user.user_id,
-                operator_name=current_user.username,
-                remark="Supervisor 服务配置",
-            )
-        except Exception as exc:
-            rollback_result = self._rollback_remote_create(payload.host, rendered.config_name, rendered.program_name)
-            if isinstance(exc, AppError):
-                raise
-            LOGGER.exception("新增服务写库失败：目标主机=%s，configName=%s", payload.host, rendered.config_name, exc_info=exc)
-            raise InternalError("新增服务写库失败", rollback_result) from exc
-
-        # 新增后不再实时查远端状态；数据库 record 已默认 status='UNKNOWN'
-        return self._build_service_payload(record, status=None, file_state=FILE_STATE_MATCH)
+    def delete_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
+        """删除单个服务。"""
+        return self.mutation_service.delete_service(host, program_name, current_user)
 
     def refresh_status(self, host: str) -> dict[str, object]:
         """对指定主机执行一次 supervisorctl status 并批量刷新数据库状态快照。"""
@@ -221,54 +190,3 @@ class SupervisorManager:
             operator_id=current_user.user_id,
             operator_name=current_user.username,
         )
-
-    def _rollback_remote_create(self, host: str, config_name: str, program_name: str) -> dict[str, object]:
-        """落库失败时立即删除刚写入的配置，并执行 reread/update 回滚现场。"""
-        rollback: dict[str, object] = {"configRemoved": False, "reread": None, "update": None}
-        try:
-            self.config_file_service.delete_config(host, config_name, delete_backup=False, program_name=program_name)
-            rollback["configRemoved"] = True
-        except AppError as exc:
-            rollback["configRemoveError"] = exc.msg
-            return rollback
-
-        try:
-            rollback["reread"] = self.supervisor_service.reread(host)
-            rollback["update"] = self.supervisor_service.update(host)
-        except AppError as exc:
-            rollback["rollbackError"] = exc.msg
-        return rollback
-
-    @staticmethod
-    def _build_service_payload(
-        record: SupervisorRegistryRecord,
-        *,
-        status: dict[str, object] | None,
-        file_state: str,
-    ) -> dict[str, object]:
-        return {
-            "id": record.id,
-            "host": record.host_ip,
-            "jobName": record.job_name,
-            "moduleName": record.module_name,
-            "programName": record.program_name,
-            "configName": record.config_name,
-            "configPath": record.config_path,
-            "fileName": record.file_name,
-            "contentProgramName": record.content_program_name,
-            "manageMode": record.manage_mode,
-            "metadataComplete": record.metadata_complete,
-            "parseWarnings": list(record.parse_warnings),
-            "javaPath": record.java_path,
-            "active": record.active_profile,
-            "port": record.port,
-            "jarName": record.jar_name,
-            "xms": record.xms,
-            "xmx": record.xmx,
-            "user": record.run_user,
-            "status": status,
-            "fileState": file_state,
-            "isArchived": record.is_archived,
-            "archivedAt": _format_datetime_text(record.archived_at),
-            "restoredAt": _format_datetime_text(record.restored_at),
-        }

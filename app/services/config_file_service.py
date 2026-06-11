@@ -66,8 +66,8 @@ class ConfigFileService:
         return Path(f"{config_path}.bak")
 
     def _ensure_remote_write_allowed(self, host: str) -> None:
-        """仅供新增服务使用，保持“按 configName 直接写入”仍然只允许 local 主机。"""
-        self.host_service.ensure_mutation_allowed(host, "当前项目禁止修改远端配置文件")
+        """创建、修改、删除统一允许对白名单主机执行受控写操作。"""
+        self.host_service.get_host(host)
 
     def _ensure_config_path_write_allowed(self, host: str) -> None:
         """归档/还原允许对受控主机按 configPath 改动既有配置现场。"""
@@ -228,6 +228,17 @@ class ConfigFileService:
         except ExecutorRuntimeError as exc:
             raise FileOperationError(f"写入配置文件失败: {config_path.name}") from exc
         return str(config_path)
+
+    def write_config_by_config_path(self, host: str, config_path: str, content: str) -> dict[str, str]:
+        """按相对路径原子写入配置，供远端与子目录服务修改复用。"""
+        self._ensure_config_path_write_allowed(host)
+        executor = self.host_service.get_executor(host)
+        absolute_path = self.build_config_path_from_relative(config_path)
+        try:
+            executor.write_text_atomic(absolute_path, content)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"写入配置文件失败: {config_path}") from exc
+        return {"configPath": self._relative_config_path(absolute_path)}
 
     def ensure_not_exists(self, host: str, config_name: str, program_name: str | None = None) -> Path:
         """确保目标顶层配置尚不存在。"""

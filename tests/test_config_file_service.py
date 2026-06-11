@@ -1,9 +1,7 @@
 """配置文件服务测试。"""
 from __future__ import annotations
 
-import pytest
-
-from app.core.exceptions import ForbiddenOperationError
+from app.executor.local import LocalExecutor
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
 from app.services.template_service import TemplateService
@@ -35,13 +33,17 @@ def test_backup_restore_and_archive_names(settings, test_environment):
     assert "9002" in restored_content
 
 
-def test_write_config_rejects_remote_host(settings):
+def test_write_config_allows_remote_host(settings, test_environment, monkeypatch):
     host_service = HostService(settings)
     template_service = TemplateService(settings)
     service = ConfigFileService(settings, host_service, template_service)
+    conf_dir = test_environment["conf_dir"]
 
-    with pytest.raises(ForbiddenOperationError, match="当前项目禁止修改远端配置文件"):
-        service.write_config("10.1.0.104", "demo_member.ini", "[program:demo_member]")
+    local_executor = LocalExecutor(settings.supervisor.command_timeout_seconds)
+    monkeypatch.setattr(host_service, "get_executor", lambda host_value: local_executor)
+    service.write_config("10.1.0.104", "demo_member.ini", "[program:demo_member]\ncommand=/bin/true\n")
+
+    assert conf_dir.joinpath("demo_member.ini").exists()
 
 
 def test_list_and_read_configs_support_recursive_relative_path(settings, test_environment):

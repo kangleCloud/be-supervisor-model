@@ -81,7 +81,7 @@ class SupervisorService:
         )
         if not result.success and allow_not_running:
             combined = f"{result.stdout}\n{result.stderr}".lower()
-            if "not running" in combined:
+            if "not running" in combined or "no such process" in combined:
                 return self._command_result_payload(result)
         if not result.success:
             raise SupervisorCommandError("停止服务失败", self._command_result_payload(result))

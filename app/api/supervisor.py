@@ -10,6 +10,7 @@ from app.schemas.supervisor import (
     PagedServiceResponse,
     ServiceCreateRequest,
     ServiceListQuery,
+    ServiceUpdateRequest,
     StatusRefreshResponse,
     SupervisorImportRequest,
 )
@@ -21,6 +22,7 @@ from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.supervisor_detail_service import SupervisorDetailService
 from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_manager import SupervisorManager
+from app.services.supervisor_mutation_service import SupervisorMutationService
 from app.services.supervisor_registry_service import SupervisorRegistryService
 from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
@@ -41,11 +43,19 @@ def get_manager() -> SupervisorManager:
     host_service = HostService(settings)
     template_service = TemplateService(settings)
     config_file_service = ConfigFileService(settings, host_service, template_service)
-    port_check_service = PortCheckService(config_file_service)
+    port_check_service = PortCheckService(config_file_service, host_service)
     supervisor_service = SupervisorService(host_service)
     registry_service = SupervisorRegistryService(settings)
     import_service = SupervisorImportService(host_service, config_file_service, template_service, registry_service)
     detail_service = SupervisorDetailService(host_service, registry_service)
+    mutation_service = SupervisorMutationService(
+        host_service,
+        template_service,
+        config_file_service,
+        port_check_service,
+        supervisor_service,
+        registry_service,
+    )
     runtime_service = SupervisorRuntimeService(host_service, registry_service, supervisor_service)
     archive_service = SupervisorArchiveService(host_service, config_file_service, registry_service, supervisor_service)
     sync_service = SupervisorSyncService(
@@ -64,6 +74,7 @@ def get_manager() -> SupervisorManager:
         registry_service,
         import_service,
         detail_service,
+        mutation_service,
         runtime_service,
         archive_service,
         sync_service,
@@ -140,7 +151,7 @@ def import_services(
 @router.post(
     "/services",
     summary="新增 Supervisor 服务",
-    description="仅允许 local 主机新增 Supervisor 服务：先在本机写入配置并执行 reread/update，成功后再把模板纳管主数据落库。",
+    description="支持 local 和 ansible 主机新增 Supervisor 服务：先写入目标主机配置并执行 reread/update，成功后再把模板纳管主数据落库。",
     response_description="新增结果。",
 )
 def create_service(
@@ -149,6 +160,37 @@ def create_service(
     current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
 ):
     return ok(manager.create_service(payload, current_user), msg="新增服务成功")
+
+
+@router.put(
+    "/services/{program_name}",
+    summary="修改 Supervisor 服务",
+    description="支持本地和远端主机修改已纳管服务；允许改 jobName/moduleName/port/configName，必要时会先停止旧服务并调整配置身份。",
+    response_description="修改结果。",
+)
+def update_service(
+    program_name: str,
+    payload: ServiceUpdateRequest,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.update_service(host, program_name, payload, current_user), msg="修改服务成功")
+
+
+@router.delete(
+    "/services/{program_name}",
+    summary="删除 Supervisor 服务",
+    description="删除前必须先尝试停止服务，再删除当前 .ini 和数据库记录；会保留 .bak 备份文件。",
+    response_description="删除结果。",
+)
+def delete_service(
+    program_name: str,
+    host: str = Query(..., description="目标主机 IP"),
+    manager: SupervisorManager = Depends(get_manager),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    return ok(manager.delete_service(host, program_name, current_user), msg="删除服务成功")
 
 
 @router.post(

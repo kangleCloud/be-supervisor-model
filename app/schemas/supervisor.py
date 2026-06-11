@@ -18,12 +18,11 @@ def _format_datetime_text(value: object) -> str | None:
     return str(value)
 
 
-class ServiceCreateRequest(BaseModel):
-    """新增服务请求。"""
+class _ServiceMutationRequestFields(BaseModel):
+    """Supervisor 增改共用字段。"""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    host: str = Field(..., description="目标主机 IP")
     job_name: str = Field(..., alias="jobName", description="业务作业名称")
     module_name: str = Field(..., alias="moduleName", description="模块名称")
     java_path: str = Field(..., alias="javaPath", description="Java 可执行文件绝对路径")
@@ -64,6 +63,24 @@ class ServiceCreateRequest(BaseModel):
         if not raw_value:
             raise ValueError(f"{info.field_name} 不能为空")
         return raw_value
+
+
+class ServiceCreateRequest(_ServiceMutationRequestFields):
+    """新增服务请求。"""
+
+    host: str = Field(..., description="目标主机 IP")
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        try:
+            return ensure_safe_host(value)
+        except ParamError as exc:
+            raise ValueError(exc.msg) from exc
+
+
+class ServiceUpdateRequest(_ServiceMutationRequestFields):
+    """修改服务请求。"""
 
 
 class SupervisorImportRequest(BaseModel):
@@ -295,6 +312,32 @@ class ServiceSyncResponse(BaseModel):
     last_sync_at: str = Field(alias="lastSyncAt")
     sync_status: str = Field(alias="syncStatus")
     sync_error: str | None = Field(default=None, alias="syncError")
+    command_results: dict[str, object] = Field(alias="commandResults")
+
+
+class ServiceUpdateResponse(BaseModel):
+    """服务修改响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    previous_program_name: str = Field(alias="previousProgramName")
+    program_name: str = Field(alias="programName")
+    config_name: str = Field(alias="configName")
+    config_path: str = Field(alias="configPath")
+    manage_mode: str = Field(alias="manageMode")
+    command_results: dict[str, object] = Field(alias="commandResults")
+
+
+class ServiceDeleteResponse(BaseModel):
+    """服务删除响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    program_name: str = Field(alias="programName")
+    deleted_config_path: str = Field(alias="deletedConfigPath")
+    backup_path: str | None = Field(default=None, alias="backupPath")
     command_results: dict[str, object] = Field(alias="commandResults")
 
 

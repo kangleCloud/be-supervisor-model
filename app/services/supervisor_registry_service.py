@@ -488,12 +488,14 @@ class SupervisorRegistryService:
 
         return updated, len(missing_names)
 
-    def ensure_can_create(self, data: SupervisorRegistryCreateData) -> None:
-        """校验同主机下 programName、configPath、port 不冲突。"""
+    def ensure_can_save(self, data: SupervisorRegistryCreateData, *, exclude_record_id: int | None = None) -> None:
+        """校验同主机下 programName、configPath、port 不冲突，可排除当前记录。"""
         normalized = self._normalize_write_data(data)
         if normalized.port is not None:
             ensure_valid_port(normalized.port)
         for record in self.list_by_host(normalized.host_ip):
+            if exclude_record_id is not None and record.id == exclude_record_id:
+                continue
             if record.program_name == normalized.program_name:
                 raise ConfigAlreadyExistsError(f"服务已存在: {record.program_name}")
             if record.config_path == normalized.config_path:
@@ -511,6 +513,10 @@ class SupervisorRegistryService:
                         }
                     ],
                 )
+
+    def ensure_can_create(self, data: SupervisorRegistryCreateData) -> None:
+        """兼容创建流程的冲突校验。"""
+        self.ensure_can_save(data)
 
     def create(
         self,
@@ -545,6 +551,117 @@ class SupervisorRegistryService:
                 record_id = int(cursor.lastrowid)
             connection.commit()
         return self._build_record_from_data(record_id, normalized)
+
+    def update_service(
+        self,
+        *,
+        record_id: int,
+        data: SupervisorRegistryCreateData,
+        operator_id: int,
+        operator_name: str,
+        remark: str,
+        status: str,
+        pid: str | None,
+        uptime: str | None,
+        command: str | None,
+        directory: str | None,
+        stdout_logfile: str | None,
+        has_backup: bool,
+        config_content: str | None,
+        backup_config_content: str | None,
+        sync_status: str,
+        sync_error: str | None,
+    ) -> None:
+        """更新单服务主数据与最新写入后的现场快照。"""
+        normalized = self._normalize_write_data(data)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE sys_supervisor_service
+                    SET job_name = %s,
+                        module_name = %s,
+                        program_name = %s,
+                        config_name = %s,
+                        config_path = %s,
+                        file_name = %s,
+                        content_program_name = %s,
+                        manage_mode = %s,
+                        baseline_content = %s,
+                        metadata_complete = %s,
+                        parse_warnings = %s,
+                        java_path = %s,
+                        active_profile = %s,
+                        port = %s,
+                        jar_name = %s,
+                        xms = %s,
+                        xmx = %s,
+                        run_user = %s,
+                        status = %s,
+                        pid = %s,
+                        uptime = %s,
+                        status_sync_time = %s,
+                        command = %s,
+                        directory = %s,
+                        stdout_logfile = %s,
+                        has_backup = %s,
+                        config_content = %s,
+                        backup_config_content = %s,
+                        last_sync_at = %s,
+                        sync_status = %s,
+                        sync_error = %s,
+                        update_by_id = %s,
+                        update_by = %s,
+                        remark = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        normalized.job_name,
+                        normalized.module_name,
+                        normalized.program_name,
+                        normalized.config_name,
+                        normalized.config_path,
+                        normalized.file_name,
+                        normalized.content_program_name,
+                        normalized.manage_mode,
+                        normalized.baseline_content,
+                        int(normalized.metadata_complete),
+                        self._serialize_parse_warnings(normalized.parse_warnings),
+                        normalized.java_path,
+                        normalized.active_profile,
+                        normalized.port,
+                        normalized.jar_name,
+                        normalized.xms,
+                        normalized.xmx,
+                        normalized.run_user,
+                        status,
+                        pid,
+                        uptime,
+                        now_str,
+                        command,
+                        directory,
+                        stdout_logfile,
+                        int(has_backup),
+                        config_content,
+                        backup_config_content,
+                        now_str,
+                        sync_status,
+                        sync_error,
+                        operator_id,
+                        operator_name,
+                        remark,
+                        record_id,
+                    ),
+                )
+            connection.commit()
+
+    def delete_service(self, record_id: int) -> None:
+        """按主键删除单条服务记录。"""
+        with get_connection(self.settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("DELETE FROM sys_supervisor_service WHERE id = %s", (record_id,))
+            connection.commit()
 
     def upsert_imported(
         self,

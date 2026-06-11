@@ -15,6 +15,7 @@ from app.core.passwords import hash_password
 
 
 PROGRAM_PATTERN = re.compile(r"\[program:(?P<name>[^\]]+)\]")
+PORT_PATTERN = re.compile(r"(?:-Dserver\.port=|server\.port=|port=)(?P<port>\d+)")
 
 
 def _build_ini(program_name: str, port: int, job_name: str = "demo", module_name: str = "member") -> str:
@@ -45,6 +46,7 @@ class FakeSupervisorCtl:
     def __init__(self, conf_dir: Path):
         self.conf_dir = conf_dir
         self.states: dict[str, str] = {}
+        self.extra_listeners: dict[int, str] = {}
 
     def _current_programs(self) -> list[str]:
         programs: list[str] = []
@@ -55,8 +57,28 @@ class FakeSupervisorCtl:
                 programs.append(match.group("name"))
         return programs
 
+    def _current_listeners(self) -> list[tuple[int, str]]:
+        listeners: list[tuple[int, str]] = []
+        for path in sorted(self.conf_dir.rglob("*.ini")):
+            content = path.read_text(encoding="utf-8")
+            program_match = PROGRAM_PATTERN.search(content)
+            port_match = PORT_PATTERN.search(content)
+            if program_match is None or port_match is None:
+                continue
+            program_name = program_match.group("name")
+            if self.states.get(program_name, "STOPPED") != "RUNNING":
+                continue
+            listeners.append((int(port_match.group("port")), program_name))
+        listeners.extend((port, label) for port, label in sorted(self.extra_listeners.items()))
+        return listeners
+
     def run(self, command, capture_output, text, timeout, check=False):  # noqa: ANN001
         args = list(command)
+        if args[:2] == ["ss", "-lnutp"]:
+            lines = ["Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process"]
+            for port, label in self._current_listeners():
+                lines.append(f"tcp LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:* users:((\"{label}\",pid=1,fd=3))")
+            return SimpleNamespace(returncode=0, stdout="\n".join(lines), stderr="")
         if not args or args[0] != "supervisorctl":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
@@ -177,6 +199,8 @@ class FakeMySQLServer:
             "sys_supervisor_service": 1,
         }
         self.fail_next_supervisor_insert = False
+        self.fail_next_supervisor_update = False
+        self.fail_next_supervisor_delete = False
 
     def connect_server(self):
         return FakeMySQLConnection(self, include_database=False)
@@ -887,7 +911,59 @@ class FakeMySQLServer:
             cursor.lastrowid = record_id
             return 1
 
+        if (
+            normalized.startswith("UPDATE sys_supervisor_service SET job_name = %s, module_name = %s, program_name = %s,")
+            and "status = %s, pid = %s, uptime = %s, status_sync_time = %s" in normalized
+        ):
+            if self.fail_next_supervisor_update:
+                self.fail_next_supervisor_update = False
+                raise RuntimeError("模拟 Supervisor 主数据更新失败")
+            record_id = int(params[-1])
+            for item in self.tables.get("sys_supervisor_service", []):
+                if int(item["id"]) != record_id:
+                    continue
+                self._hydrate_supervisor_defaults(item)
+                item["job_name"] = str(params[0]) if params[0] is not None else None
+                item["module_name"] = str(params[1]) if params[1] is not None else None
+                item["program_name"] = str(params[2])
+                item["config_name"] = str(params[3])
+                item["config_path"] = str(params[4])
+                item["file_name"] = str(params[5])
+                item["content_program_name"] = str(params[6])
+                item["manage_mode"] = str(params[7])
+                item["baseline_content"] = str(params[8])
+                item["metadata_complete"] = int(params[9])
+                item["parse_warnings"] = str(params[10])
+                item["java_path"] = str(params[11]) if params[11] is not None else None
+                item["active_profile"] = str(params[12]) if params[12] is not None else None
+                item["port"] = int(params[13]) if params[13] is not None else None
+                item["jar_name"] = str(params[14]) if params[14] is not None else None
+                item["xms"] = str(params[15]) if params[15] is not None else None
+                item["xmx"] = str(params[16]) if params[16] is not None else None
+                item["run_user"] = str(params[17]) if params[17] is not None else None
+                item["status"] = str(params[18])
+                item["pid"] = str(params[19]) if params[19] is not None else None
+                item["uptime"] = str(params[20]) if params[20] is not None else None
+                item["status_sync_time"] = str(params[21])
+                item["command"] = str(params[22]) if params[22] is not None else None
+                item["directory"] = str(params[23]) if params[23] is not None else None
+                item["stdout_logfile"] = str(params[24]) if params[24] is not None else None
+                item["has_backup"] = int(params[25])
+                item["config_content"] = str(params[26]) if params[26] is not None else None
+                item["backup_config_content"] = str(params[27]) if params[27] is not None else None
+                item["last_sync_at"] = str(params[28])
+                item["sync_status"] = str(params[29])
+                item["sync_error"] = str(params[30]) if params[30] is not None else None
+                item["update_by_id"] = int(params[31])
+                item["update_by"] = str(params[32])
+                item["remark"] = str(params[33])
+                return 1
+            return 0
+
         if normalized.startswith("UPDATE sys_supervisor_service SET job_name = %s,"):
+            if self.fail_next_supervisor_update:
+                self.fail_next_supervisor_update = False
+                raise RuntimeError("模拟 Supervisor 主数据更新失败")
             record_id = int(params[-1])
             for item in self.tables.get("sys_supervisor_service", []):
                 if int(item["id"]) != record_id:
@@ -916,6 +992,18 @@ class FakeMySQLServer:
                 item["remark"] = str(params[20])
                 return 1
             return 0
+
+        if normalized == "DELETE FROM sys_supervisor_service WHERE id = %s":
+            if self.fail_next_supervisor_delete:
+                self.fail_next_supervisor_delete = False
+                raise RuntimeError("模拟 Supervisor 主数据删除失败")
+            record_id = int(params[0])
+            rows = self.tables.get("sys_supervisor_service", [])
+            before = len(rows)
+            self.tables["sys_supervisor_service"] = [item for item in rows if int(item["id"]) != record_id]
+            deleted = before - len(self.tables["sys_supervisor_service"])
+            cursor.rowcount = deleted
+            return deleted
 
         if normalized.startswith("SELECT COUNT(*) AS cnt FROM sys_supervisor_service"):
             rows = list(self.tables.get("sys_supervisor_service", []))
