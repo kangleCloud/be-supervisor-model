@@ -219,6 +219,52 @@ class PagedServiceResponse(BaseModel):
     pages: int
 
 
+class SupervisorOverviewCpu(BaseModel):
+    """CPU 概况。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    usage_percent: float = Field(alias="usagePercent")
+
+
+class SupervisorOverviewMemory(BaseModel):
+    """内存概况。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    usage_percent: float = Field(alias="usagePercent")
+    used_bytes: int = Field(alias="usedBytes")
+    total_bytes: int = Field(alias="totalBytes")
+    used_text: str = Field(alias="usedText")
+    total_text: str = Field(alias="totalText")
+
+
+class SupervisorOverviewChecks(BaseModel):
+    """主机概况检查项。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    supervisorctl_available: bool = Field(alias="supervisorctlAvailable")
+    conf_dir_readable: bool = Field(alias="confDirReadable")
+
+
+class SupervisorOverviewResponse(BaseModel):
+    """Supervisor 主机实时概况响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    host_name: str = Field(alias="hostName")
+    executor_type: str = Field(alias="executorType")
+    available: bool
+    connection_state: Literal["CONNECTED", "UNREACHABLE", "UNSUPPORTED"] = Field(alias="connectionState")
+    collected_at: str = Field(alias="collectedAt")
+    cpu: SupervisorOverviewCpu
+    memory: SupervisorOverviewMemory
+    checks: SupervisorOverviewChecks
+    warnings: list[str] = Field(default_factory=list)
+
+
 class StatusRefreshResponse(BaseModel):
     """状态刷新响应。"""
 

@@ -15,6 +15,7 @@ from app.schemas.supervisor import (
     ServiceUpdateRequest,
     StatusRefreshResponse,
     SupervisorImportRequest,
+    SupervisorOverviewResponse,
 )
 from app.services.auth_service import AuthenticatedUser
 from app.services.config_file_service import ConfigFileService
@@ -24,6 +25,7 @@ from app.services.supervisor_archive_service import SupervisorArchiveService
 from app.services.supervisor_detail_service import SupervisorDetailService
 from app.services.supervisor_import_service import SupervisorImportService
 from app.services.supervisor_mutation_service import SupervisorMutationService
+from app.services.supervisor_overview_service import SupervisorOverviewService
 from app.services.supervisor_registry_service import ImportStagingService, SupervisorRegistryService
 from app.services.supervisor_runtime_service import SupervisorRuntimeService
 from app.services.supervisor_service import SupervisorService
@@ -64,6 +66,7 @@ _archive_service = SupervisorArchiveService(_host_service, _config_file_service,
 _sync_service = SupervisorSyncService(
     _host_service, _config_file_service, _registry_service, _supervisor_service, _template_service,
 )
+_overview_service = SupervisorOverviewService(_settings, _host_service)
 
 
 # ---- 主机查询 ----
@@ -76,6 +79,19 @@ _sync_service = SupervisorSyncService(
 )
 async def list_hosts():
     return ok(await run_blocking(_host_service.list_hosts), msg="查询主机列表成功")
+
+
+@router.get(
+    "/overview",
+    summary="查询主机实时概况",
+    description="实时采集目标主机 CPU、内存和 Supervisor 基础检查结果，不落库。",
+    response_description="主机实时概况。",
+)
+async def get_host_overview(host: str = Query(..., description="目标主机 IP")):
+    result = SupervisorOverviewResponse(**await run_blocking(_overview_service.get_overview, host))
+    payload = ok(result.model_dump(by_alias=True), msg="查询主机概况成功")
+    payload.headers["Cache-Control"] = "no-store"
+    return payload
 
 
 # ---- 服务列表 ----
