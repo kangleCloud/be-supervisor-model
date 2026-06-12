@@ -163,10 +163,6 @@ class SQLiteTestDB:
                 if table_name.startswith("sqlite_"):
                     continue
                 rows = [dict(row) for row in connection.execute(f"SELECT * FROM {table_name} ORDER BY id ASC")]
-                if table_name == "sys_supervisor_service":
-                    for row in rows:
-                        row.setdefault("program_name", row.get("content_program_name"))
-                        row.setdefault("config_name", row.get("file_name"))
                 result[table_name] = rows
         return result
 

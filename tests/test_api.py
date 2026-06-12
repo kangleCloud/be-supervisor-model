@@ -962,7 +962,7 @@ def test_api_update_service_renames_program_and_config(client, test_environment,
     assert conf_dir.joinpath("demo-project_gateway.ini").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
     record = fake_mysql.tables["sys_supervisor_service"][0]
-    assert record.get("content_program_name", record.get("program_name")) == "demo-project_gateway"
+    assert record["content_program_name"] == "demo-project_gateway"
     assert record["config_path"] == "demo-project_gateway.ini"
     assert record["port"] == 9011
     assert record["status"] in ("STOPPED", "UNKNOWN")
@@ -1153,7 +1153,7 @@ def test_api_update_rolls_back_remote_files_when_registry_update_fails(client, t
     assert conf_dir.joinpath("demo-project_member.ini").exists()
     assert not conf_dir.joinpath("demo-project_gateway.ini").exists()
     assert conf_dir.joinpath("demo-project_member.ini").read_text(encoding="utf-8") == original_content
-    assert fake_mysql.tables["sys_supervisor_service"][0]["program_name"] == "demo-project_member"
+    assert fake_mysql.tables["sys_supervisor_service"][0]["content_program_name"] == "demo-project_member"
 
 
 def test_api_delete_rolls_back_remote_files_when_registry_delete_fails(client, test_environment, seed_user, fake_mysql):
