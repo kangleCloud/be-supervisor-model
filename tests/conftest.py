@@ -525,6 +525,7 @@ def client(test_environment, fake_mysql, fake_supervisor, monkeypatch):
     from app.services.supervisor_runtime_service import SupervisorRuntimeService
     from app.services.supervisor_archive_service import SupervisorArchiveService
     from app.services.supervisor_sync_service import SupervisorSyncService
+    from app.services.supervisor_overview_service import SupervisorOverviewService
 
     async def test_init_database(settings):
         await _init_sqlite_database(settings, test_environment["db_path"])
@@ -563,6 +564,7 @@ def client(test_environment, fake_mysql, fake_supervisor, monkeypatch):
     api_module._sync_service = SupervisorSyncService(
         api_module._host_service, api_module._config_file_service, api_module._registry_service, api_module._supervisor_service, api_module._template_service,
     )
+    api_module._overview_service = SupervisorOverviewService(settings, api_module._host_service)
 
     from app.main import create_app
 

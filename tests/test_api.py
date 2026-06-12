@@ -40,6 +40,18 @@ class _FakeImportRemoteExecutor:
         return self.file_contents[path]
 
 
+class _FakeOverviewExecutor:
+    """只模拟概况接口所需的单次受控命令。"""
+
+    def __init__(self, result: CommandResult):
+        self.result = result
+        self.commands: list[tuple[object, object]] = []
+
+    def run_command(self, command, timeout=None):  # noqa: ANN001
+        self.commands.append((tuple(command), timeout))
+        return self.result
+
+
 def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[str, object]:
     return {
         "host": host,
@@ -204,6 +216,192 @@ def test_api_list_uses_database_as_source(client, test_environment, seed_user):
     assert data["page"] == 1
     assert data["pageSize"] == 10
     assert data["pages"] == 0
+
+
+def test_api_overview_requires_jwt(client):
+    response = client.get("/admin/api/supervisor/overview", params={"host": "127.0.0.1"})
+
+    assert response.status_code == 401
+    assert response.json()["code"] == 40100
+
+
+def test_api_overview_local_host_returns_unsupported(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "127.0.0.1"}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    data = response.json()["data"]
+    assert data["host"] == "127.0.0.1"
+    assert data["hostName"] == "local"
+    assert data["executorType"] == "local"
+    assert data["available"] is False
+    assert data["connectionState"] == "UNSUPPORTED"
+    assert data["cpu"]["usagePercent"] == 0.0
+    assert data["memory"]["usedBytes"] == 0
+    assert data["memory"]["totalBytes"] == 0
+    assert data["memory"]["usedText"] == "0 B"
+    assert data["memory"]["totalText"] == "0 B"
+    assert data["checks"]["supervisorctlAvailable"] is False
+    assert data["checks"]["confDirReadable"] is False
+    assert data["warnings"]
+
+
+def test_api_overview_rejects_invalid_host(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.9.9.9"}, headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40001
+    assert response.json()["msg"] == "目标主机不在白名单中"
+
+
+def test_api_overview_remote_connected_returns_metrics(client, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeOverviewExecutor(
+        CommandResult(
+            ("sh", "-lc", "overview"),
+            0,
+            "\n".join(
+                [
+                    "STATUS=OK",
+                    "HOSTNAME=web-104-host",
+                    "SUPERVISORCTL_AVAILABLE=true",
+                    "CONF_DIR_READABLE=true",
+                    "CPU_USAGE_PERCENT=12.34",
+                    "MEM_TOTAL_BYTES=8589934592",
+                    "MEM_USED_BYTES=4294967296",
+                    "MEM_USAGE_PERCENT=50.00",
+                ]
+            ),
+            "",
+        )
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.1.0.104"}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    data = response.json()["data"]
+    assert data["host"] == "10.1.0.104"
+    assert data["hostName"] == "web-104-host"
+    assert data["executorType"] == "ansible"
+    assert data["available"] is True
+    assert data["connectionState"] == "CONNECTED"
+    assert data["cpu"]["usagePercent"] == 12.34
+    assert data["memory"]["usedBytes"] == 4294967296
+    assert data["memory"]["totalBytes"] == 8589934592
+    assert data["memory"]["usagePercent"] == 50.0
+    assert data["checks"]["supervisorctlAvailable"] is True
+    assert data["checks"]["confDirReadable"] is True
+    assert data["warnings"] == []
+    assert fake_executor.commands[0][1] == 8
+
+
+def test_api_overview_remote_unreachable_returns_200(client, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeOverviewExecutor(
+        CommandResult(("sh", "-lc", "overview"), 4, "", "Failed to connect to the host via ssh: Connection timed out")
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.1.0.104"}, headers=headers)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    data = response.json()["data"]
+    assert data["available"] is False
+    assert data["connectionState"] == "UNREACHABLE"
+    assert data["checks"]["supervisorctlAvailable"] is False
+    assert data["checks"]["confDirReadable"] is False
+    assert any("目标主机不可达" in item for item in data["warnings"])
+
+
+def test_api_overview_remote_supported_but_checks_fail(client, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeOverviewExecutor(
+        CommandResult(
+            ("sh", "-lc", "overview"),
+            0,
+            "\n".join(
+                [
+                    "STATUS=OK",
+                    "HOSTNAME=web-104-host",
+                    "SUPERVISORCTL_AVAILABLE=false",
+                    "CONF_DIR_READABLE=false",
+                    "CPU_USAGE_PERCENT=1.23",
+                    "MEM_TOTAL_BYTES=1024",
+                    "MEM_USED_BYTES=512",
+                    "MEM_USAGE_PERCENT=50.00",
+                ]
+            ),
+            "",
+        )
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.1.0.104"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["connectionState"] == "CONNECTED"
+    assert data["available"] is False
+    assert data["checks"]["supervisorctlAvailable"] is False
+    assert data["checks"]["confDirReadable"] is False
+    assert any("supervisorctl" in item for item in data["warnings"])
+    assert any("配置目录不可读" in item for item in data["warnings"])
+
+
+def test_api_overview_remote_proc_missing_returns_unsupported(client, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+    from app.services.host_service import HostService
+
+    fake_executor = _FakeOverviewExecutor(
+        CommandResult(
+            ("sh", "-lc", "overview"),
+            0,
+            "\n".join(
+                [
+                    "STATUS=UNSUPPORTED",
+                    "HOSTNAME=web-104-host",
+                    "SUPERVISORCTL_AVAILABLE=true",
+                    "CONF_DIR_READABLE=true",
+                    "CPU_USAGE_PERCENT=0.00",
+                    "MEM_TOTAL_BYTES=0",
+                    "MEM_USED_BYTES=0",
+                    "MEM_USAGE_PERCENT=0.00",
+                    "WARNING=/proc 文件不可读，无法采集 Linux CPU/内存概况",
+                ]
+            ),
+            "",
+        )
+    )
+    monkeypatch.setattr(HostService, "get_executor", lambda self, host_value: fake_executor)
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.1.0.104"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["connectionState"] == "UNSUPPORTED"
+    assert data["available"] is False
+    assert data["cpu"]["usagePercent"] == 0.0
+    assert data["memory"]["totalBytes"] == 0
+    assert any("/proc" in item for item in data["warnings"])
 
 
 def test_api_detail_uses_database_only(client, test_environment, seed_user, monkeypatch):

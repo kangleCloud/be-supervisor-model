@@ -5,7 +5,7 @@
 当前版本包含两类能力：
 
 - 登录鉴权：登录、查询当前用户、退出登录
-- Supervisor 管理：查询主机、分页查询纳管服务、查询服务详情、同步单服务远端快照、执行初始化导入、创建/修改/删除服务、启动/停止/重启、归档/还原
+- Supervisor 管理：查询主机、查询主机实时概况、分页查询纳管服务、查询服务详情、同步单服务远端快照、执行初始化导入、创建/修改/删除服务、启动/停止/重启、归档/还原
 
 Supervisor 配置主数据落在 MySQL 8 的 `sys_supervisor_service` 表中；远端 `/etc/supervisord.d` 及其子目录中的 `*.ini` 是实际生效结果；详情和列表默认只读数据库，远端状态与配置快照通过显式同步接口或批量状态刷新接口写回数据库。
 
@@ -250,6 +250,7 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 - 本次 Supervisor 归档与运行操作联动见 [docs/09.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor归档与运行操作联动说明.md)
 - 本次 Supervisor 详情数据库化与单服务同步见 [docs/10.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor详情数据库化与单服务同步说明.md)
 - 本次 Supervisor 本地远端统一增改删见 [docs/11.Supervisor本地远端统一增改删说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/11.Supervisor本地远端统一增改删说明.md)
+- 本次 Supervisor 服务器概况真实 API 见 [docs/12.Supervisor服务器概况真实API说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/12.Supervisor服务器概况真实API说明.md)
 
 ## 启动方式
 
@@ -291,6 +292,7 @@ aerich upgrade
 - `GET /admin/api/auth/profile`
 - `POST /admin/api/auth/logout`
 - `GET /admin/api/supervisor/hosts`
+- `GET /admin/api/supervisor/overview?host=10.1.0.104`（实时只读采集主机 CPU/内存/基础检查，不落库；响应头固定 `Cache-Control: no-store`；local 主机在 v1 返回 `UNSUPPORTED`）
 - `POST /admin/api/supervisor/imports`
 - `GET /admin/api/supervisor/services?host=&keyword=&status=&archived=&page=&pageSize=`（分页查询，纯数据库，不触发远端命令；默认 `archived=false`）
 - `GET /admin/api/supervisor/services/{programName}?host=127.0.0.1`（详情，纯数据库快照）
@@ -304,6 +306,14 @@ aerich upgrade
 - `POST /admin/api/supervisor/services/{programName}/archive?host=10.1.0.104`
 - `POST /admin/api/supervisor/services/{programName}/restore?host=10.1.0.104`
 - `POST /admin/api/supervisor/services/status/refresh?host=127.0.0.1`（批量刷新状态快照）
+
+主机实时概况接口说明：
+
+- `GET /admin/api/supervisor/overview?host=...` 走后端实时采集，不写 MySQL，不启后台线程
+- 远端 `ansible` Linux 主机会执行一次固定只读脚本，采集 `hostname`、CPU、内存、`supervisorctl` 可用性和 `/etc/supervisord.d` 可读性
+- `local` 主机在 v1 固定返回 `available=false`、`connectionState=UNSUPPORTED`
+- 目标主机暂时不可达时返回 `200`，但 `available=false`、`connectionState=UNREACHABLE`
+- 响应头固定 `Cache-Control: no-store`，前端短缓存仅用于体验优化，不是权威数据源
 
 ## 跨域访问说明
 
