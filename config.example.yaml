@@ -21,6 +21,7 @@ supervisor:
 
 executor:
   type: local
+  # inventory 必须能按 hosts[].ip 直接匹配；概况/导入/同步等远端 ansible 读取都会复用这里的配置
   inventoryPath: /Users/zhuningkang/.ansible/supervisor_host
   remoteUser: root
   timeoutSeconds: 300

@@ -118,7 +118,7 @@ cp .env.example .env.prod
 - `database.host` / `database.port` / `database.name` / `database.user`
 - `auth.accessTokenExpireMinutes`
 - `supervisor.confDir` / `supervisor.commandTimeoutSeconds`（默认 300，环境变量 `COMMAND_TIMEOUT_SECONDS` 可覆盖）
-- `executor.type` / `executor.inventoryPath` / `executor.remoteUser` / `executor.timeoutSeconds`（默认 300，环境变量 `ANSIBLE_COMMAND_TIMEOUT_SECONDS` 可覆盖）
+- `executor.type` / `executor.inventoryPath` / `executor.remoteUser` / `executor.timeoutSeconds`（默认 300，环境变量 `ANSIBLE_COMMAND_TIMEOUT_SECONDS` 可覆盖；概况、导入、同步等远端 ansible 读取统一复用该超时）
 - `hosts`
 
 `.env.dev` / `.env.prod` 负责的敏感覆盖项：
@@ -321,9 +321,12 @@ aerich upgrade
 
 - `GET /admin/api/supervisor/overview?host=...` 走后端实时采集，不写 MySQL，不启后台线程
 - 远端 `ansible` Linux 主机会执行一次固定只读脚本，采集 `hostname`、CPU、内存、`supervisorctl` 可用性和 `/etc/supervisord.d` 可读性
+- 概况接口不再单独使用 8s 短超时，统一复用 `executor.timeoutSeconds`
 - `local` 主机在 v1 固定返回 `available=false`、`connectionState=UNSUPPORTED`
 - 目标主机暂时不可达时返回 `200`，但 `available=false`、`connectionState=UNREACHABLE`
 - 响应头固定 `Cache-Control: no-store`，前端短缓存仅用于体验优化，不是权威数据源
+- Supervisor 页面所有展示数据都必须走后端接口，不允许前端回填 mock CPU/内存/检查项
+- 前端判断“不可达”必须依赖 `connectionState + warnings + checks`，不能把 `0.00% / 0 B` 当成真实主机负载
 
 ## 跨域访问说明
 

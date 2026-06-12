@@ -260,7 +260,7 @@ def test_api_overview_rejects_invalid_host(client, seed_user):
     assert response.json()["msg"] == "目标主机不在白名单中"
 
 
-def test_api_overview_remote_connected_returns_metrics(client, seed_user, monkeypatch):
+def test_api_overview_remote_connected_returns_metrics(client, seed_user, settings, monkeypatch):
     seed_user()
     headers = _login_headers(client)
     from app.services.host_service import HostService
@@ -303,7 +303,7 @@ def test_api_overview_remote_connected_returns_metrics(client, seed_user, monkey
     assert data["checks"]["supervisorctlAvailable"] is True
     assert data["checks"]["confDirReadable"] is True
     assert data["warnings"] == []
-    assert fake_executor.commands[0][1] == 8
+    assert fake_executor.commands[0][1] == settings.executor.ansible_timeout_seconds
 
 
 def test_api_overview_remote_unreachable_returns_200(client, seed_user, monkeypatch):
@@ -326,6 +326,28 @@ def test_api_overview_remote_unreachable_returns_200(client, seed_user, monkeypa
     assert data["checks"]["supervisorctlAvailable"] is False
     assert data["checks"]["confDirReadable"] is False
     assert any("目标主机不可达" in item for item in data["warnings"])
+
+
+def test_api_overview_remote_inventory_missing_returns_200(client, seed_user, monkeypatch):
+    seed_user()
+    headers = _login_headers(client)
+    from app.executor.ansible import AnsibleExecutor
+
+    monkeypatch.setattr(
+        AnsibleExecutor,
+        "_inventory_error_text",
+        lambda self: "Ansible inventory 不存在或不可读: /tmp/missing-inventory",
+    )
+
+    response = client.get("/admin/api/supervisor/overview", params={"host": "10.1.0.104"}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["available"] is False
+    assert data["connectionState"] == "UNREACHABLE"
+    assert data["cpu"]["usagePercent"] == 0.0
+    assert data["memory"]["totalBytes"] == 0
+    assert any("Ansible inventory 不存在或不可读" in item for item in data["warnings"])
 
 
 def test_api_overview_remote_supported_but_checks_fail(client, seed_user, monkeypatch):

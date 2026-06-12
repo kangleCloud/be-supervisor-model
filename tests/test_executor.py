@@ -1,6 +1,8 @@
 """执行器测试。"""
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +63,26 @@ def test_ansible_executor_uses_ip_pattern_without_o_and_minimal_callback(setting
     assert "-o" not in captured["command"]
     assert captured["env"]["ANSIBLE_STDOUT_CALLBACK"] == "ansible.builtin.minimal"
     assert captured["timeout"] == settings.executor.ansible_timeout_seconds
+
+
+def test_ansible_executor_returns_inventory_config_error_when_inventory_missing(settings, monkeypatch):
+    remote_host = next(host for host in settings.hosts if host.ip == "10.1.0.104")
+    broken_executor_settings = replace(
+        settings.executor,
+        ansible_inventory_path=Path("/tmp/codex-missing-ansible-inventory"),
+    )
+    executor = AnsibleExecutor(remote_host, broken_executor_settings)
+
+    def fail_if_called(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise AssertionError("inventory 缺失时不应继续调用 subprocess.run")
+
+    monkeypatch.setattr("app.executor.ansible.subprocess.run", fail_if_called)
+
+    result = executor.run_command(["hostname"])
+
+    assert not result.success
+    assert result.exit_code == 2
+    assert "Ansible inventory 不存在或不可读" in result.stderr
 
 
 def test_host_service_rejects_remote_mutation(settings):

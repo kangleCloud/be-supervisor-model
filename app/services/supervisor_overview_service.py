@@ -13,8 +13,6 @@ CONNECTION_STATE_CONNECTED = "CONNECTED"
 CONNECTION_STATE_UNREACHABLE = "UNREACHABLE"
 CONNECTION_STATE_UNSUPPORTED = "UNSUPPORTED"
 
-OVERVIEW_TIMEOUT_SECONDS = 8
-
 _UNREACHABLE_MARKERS = (
     "unreachable",
     "failed to connect",
@@ -59,7 +57,11 @@ class SupervisorOverviewService:
             )
 
         executor = self.host_service.get_executor(host_config.ip)
-        result = executor.run_command(["sh", "-lc", self._build_overview_script()], timeout=OVERVIEW_TIMEOUT_SECONDS)
+        # 概况采集与其他 ansible 远端读取统一复用执行器超时配置，避免单独维护另一套 8s 特例。
+        result = executor.run_command(
+            ["sh", "-lc", self._build_overview_script()],
+            timeout=self.settings.executor.ansible_timeout_seconds,
+        )
         if not result.success:
             return self._build_response(
                 host=host_config.ip,
@@ -297,6 +299,8 @@ echo "MEM_USAGE_PERCENT=$mem_usage_percent"
     @staticmethod
     def _normalize_failure_message(result: CommandResult) -> str:
         message = result.stderr.strip() or result.stdout.strip() or "目标主机不可达"
+        if "Ansible inventory 不存在或不可读" in message:
+            return message
         normalized = message.lower()
         if any(marker in normalized for marker in _UNREACHABLE_MARKERS):
             return f"目标主机不可达: {message}"

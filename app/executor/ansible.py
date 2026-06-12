@@ -45,8 +45,20 @@ class AnsibleExecutor(RemoteExecutor):
             self.settings.ansible_remote_user,
         ]
 
+    def _inventory_error_text(self) -> str | None:
+        """控制机侧先校验 inventory 可读性，避免把本地配置错误误判成远端 SSH 不可达。"""
+        inventory_path = self.settings.ansible_inventory_path
+        if not inventory_path.exists():
+            return f"Ansible inventory 不存在或不可读: {inventory_path}"
+        if not os.access(inventory_path, os.R_OK):
+            return f"Ansible inventory 不存在或不可读: {inventory_path}"
+        return None
+
     def _run_ansible(self, module: str, module_args: str, timeout: int | None = None) -> CommandResult:
         command = self._base_args() + ["-m", module, "-a", module_args]
+        inventory_error = self._inventory_error_text()
+        if inventory_error is not None:
+            return CommandResult(tuple(command), 2, "", inventory_error)
         try:
             proc = subprocess.run(
                 command,
