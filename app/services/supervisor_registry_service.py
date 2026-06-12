@@ -545,11 +545,6 @@ class SupervisorRegistryService:
             raise ParamError("manageMode 非法")
 
         safe_content_pn = ensure_safe_program_name(data.content_program_name)
-        TemplateService.ensure_program_identity(
-            job_name=data.job_name,
-            module_name=data.module_name,
-            content_program_name=safe_content_pn,
-        )
         safe_file_name = normalize_config_name(data.file_name, safe_content_pn)
         safe_config_path = normalize_config_path(data.config_path)
         if PurePosixPath(safe_config_path).name != safe_file_name:

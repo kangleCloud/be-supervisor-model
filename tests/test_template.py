@@ -13,6 +13,7 @@ def test_template_render_and_parse(settings):
         host="127.0.0.1",
         jobName="test-agent_be-suda",
         moduleName="sjfy-admin",
+        contentProgramName="sjfy-admin-test-agent",
         javaPath="/usr/local/jdk17/bin/java",
         active="prod",
         port=9001,
@@ -26,9 +27,9 @@ def test_template_render_and_parse(settings):
     rendered = service.render(payload)
     parsed = service.parse(rendered.content)
 
-    assert rendered.program_name == "test-agent_be-suda_sjfy-admin"
-    assert rendered.config_name == "test-agent_be-suda_sjfy-admin.ini"
-    assert "[program:test-agent_be-suda_sjfy-admin]" in rendered.content
+    assert rendered.program_name == "sjfy-admin-test-agent"
+    assert rendered.config_name == "sjfy-admin-test-agent.ini"
+    assert "[program:sjfy-admin-test-agent]" in rendered.content
     assert parsed.port == 9001
     assert parsed.job_name == "test-agent_be-suda"
     assert parsed.module_name == "sjfy-admin"

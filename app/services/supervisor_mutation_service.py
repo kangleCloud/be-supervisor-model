@@ -320,6 +320,7 @@ class SupervisorMutationService:
         rendered = self.template_service.render_service(
             job_name=payload.job_name,
             module_name=payload.module_name,
+            content_program_name=payload.content_program_name,
             java_path=payload.java_path,
             active=payload.active,
             port=payload.port,

@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.exceptions import ParamError
-from app.core.security import ensure_safe_host, ensure_safe_name, ensure_valid_port
+from app.core.security import ensure_safe_host, ensure_safe_name, ensure_safe_program_name, ensure_valid_port
 
 
 def _format_datetime_text(value: object) -> str | None:
@@ -25,6 +25,7 @@ class _ServiceMutationRequestFields(BaseModel):
 
     job_name: str = Field(..., alias="jobName", description="业务作业名称")
     module_name: str = Field(..., alias="moduleName", description="模块名称")
+    content_program_name: str = Field(..., alias="contentProgramName", description="配置内容中的 Supervisor program name")
     java_path: str = Field(..., alias="javaPath", description="Java 可执行文件绝对路径")
     active: str = Field(..., description="Spring profile 环境")
     port: int = Field(..., description="服务监听端口")
@@ -55,6 +56,14 @@ class _ServiceMutationRequestFields(BaseModel):
         if not value:
             return value
         return ensure_safe_name(value, "jarName")
+
+    @field_validator("content_program_name")
+    @classmethod
+    def validate_content_program_name(cls, value: str) -> str:
+        try:
+            return ensure_safe_program_name(value)
+        except ParamError as exc:
+            raise ValueError(exc.msg) from exc
 
     @field_validator("java_path", "active", "xms", "xmx", "user")
     @classmethod

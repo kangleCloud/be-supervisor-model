@@ -52,31 +52,46 @@ class _FakeOverviewExecutor:
         return self.result
 
 
-def _payload(host: str, module_name: str = "member", port: int = 9001) -> dict[str, object]:
+def _payload(
+    host: str,
+    module_name: str = "member",
+    port: int = 9001,
+    *,
+    content_program_name: str | None = None,
+    file_name: str = "",
+) -> dict[str, object]:
     return {
         "host": host,
         "jobName": "demo-project",
         "moduleName": module_name,
+        "contentProgramName": content_program_name or f"demo-project_{module_name}",
         "javaPath": "/usr/local/jdk17/bin/java",
         "active": "prod",
         "port": port,
         "jarName": f"{module_name}.jar",
-        "fileName": "",
+        "fileName": file_name,
         "xms": "128m",
         "xmx": "128m",
         "user": "root",
     }
 
 
-def _update_payload(module_name: str = "member", port: int = 9001) -> dict[str, object]:
+def _update_payload(
+    module_name: str = "member",
+    port: int = 9001,
+    *,
+    content_program_name: str | None = None,
+    file_name: str = "",
+) -> dict[str, object]:
     return {
         "jobName": "demo-project",
         "moduleName": module_name,
+        "contentProgramName": content_program_name or f"demo-project_{module_name}",
         "javaPath": "/usr/local/jdk17/bin/java",
         "active": "prod",
         "port": port,
         "jarName": f"{module_name}.jar",
-        "fileName": "",
+        "fileName": file_name,
         "xms": "128m",
         "xmx": "128m",
         "user": "root",
@@ -145,22 +160,22 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
 
     create_response = client.post(
         "/admin/api/supervisor/services",
-        json=_payload("127.0.0.1"),
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
         headers=headers,
     )
     assert create_response.status_code == 200
     create_data = create_response.json()["data"]
-    assert create_data["contentProgramName"] == "demo-project_member"
-    assert create_data["fileName"] == "demo-project_member.ini"
-    assert create_data["configPath"] == "demo-project_member.ini"
-    assert create_data["fileName"] == "demo-project_member.ini"
-    assert create_data["contentProgramName"] == "demo-project_member"
+    assert create_data["contentProgramName"] == "member-demo-project"
+    assert create_data["fileName"] == "member-demo-project.ini"
+    assert create_data["configPath"] == "member-demo-project.ini"
+    assert create_data["fileName"] == "member-demo-project.ini"
+    assert create_data["contentProgramName"] == "member-demo-project"
     assert create_data["manageMode"] == "TEMPLATE_MANAGED"
     assert create_data["metadataComplete"] is True
     assert create_data["parseWarnings"] == []
     assert create_data["fileState"] == "MATCH"
     assert create_data["status"] is None
-    assert (conf_dir / "demo-project_member.ini").exists()
+    assert (conf_dir / "member-demo-project.ini").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
 
     list_response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
@@ -170,12 +185,12 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert list_data["page"] == 1
     assert list_data["pageSize"] == 10
     assert len(list_data["records"]) == 1
-    assert list_data["records"][0]["contentProgramName"] == "demo-project_member"
-    assert list_data["records"][0]["configPath"] == "demo-project_member.ini"
+    assert list_data["records"][0]["contentProgramName"] == "member-demo-project"
+    assert list_data["records"][0]["configPath"] == "member-demo-project.ini"
     assert list_data["records"][0]["status"] == "UNKNOWN"
 
     detail_response = client.get(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
@@ -186,8 +201,8 @@ def test_api_create_and_read_flow(client, test_environment, seed_user, fake_mysq
     assert detail_data["hostName"] == "local"
     assert detail_data["jobName"] == "demo-project"
     assert detail_data["moduleName"] == "member"
-    assert detail_data["configPath"] == "demo-project_member.ini"
-    assert detail_data["fileName"] == "demo-project_member.ini"
+    assert detail_data["configPath"] == "member-demo-project.ini"
+    assert detail_data["fileName"] == "member-demo-project.ini"
     assert detail_data["status"] == "UNKNOWN"
     assert detail_data["pid"] is None
     assert detail_data["uptime"] is None
@@ -924,12 +939,17 @@ def test_api_supports_remote_service_creation(client, seed_user, fake_mysql, mon
     headers = _login_headers(client)
     _force_remote_to_local_executor(monkeypatch, settings)
 
-    response = client.post("/admin/api/supervisor/services", json=_payload("10.1.0.104"), headers=headers)
+    response = client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("10.1.0.104", content_program_name="member-demo-project"),
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert response.json()["data"]["host"] == "10.1.0.104"
+    assert response.json()["data"]["contentProgramName"] == "member-demo-project"
     assert fake_mysql.tables["sys_supervisor_service"][0]["host_ip"] == "10.1.0.104"
-    assert test_environment["conf_dir"].joinpath("demo-project_member.ini").exists()
+    assert test_environment["conf_dir"].joinpath("member-demo-project.ini").exists()
 
 
 def test_api_update_service_renames_program_and_config(client, test_environment, seed_user, fake_mysql, fake_supervisor):
@@ -937,33 +957,41 @@ def test_api_update_service_renames_program_and_config(client, test_environment,
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
 
-    create_response = client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+    create_response = client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
     assert create_response.status_code == 200
-    fake_supervisor.states["demo-project_member"] = "RUNNING"
+    fake_supervisor.states["member-demo-project"] = "RUNNING"
 
     response = client.put(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
-        json=_update_payload("gateway", 9011),
+        json=_update_payload(
+            "gateway",
+            9011,
+            content_program_name="gateway-demo-project",
+        ),
         headers=headers,
     )
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["previousContentProgramName"] == "demo-project_member"
-    assert data["contentProgramName"] == "demo-project_gateway"
-    assert data["fileName"] == "demo-project_gateway.ini"
-    assert data["configPath"] == "demo-project_gateway.ini"
+    assert data["previousContentProgramName"] == "member-demo-project"
+    assert data["contentProgramName"] == "gateway-demo-project"
+    assert data["fileName"] == "gateway-demo-project.ini"
+    assert data["configPath"] == "gateway-demo-project.ini"
     assert data["manageMode"] == "TEMPLATE_MANAGED"
     assert data["commandResults"]["stop"]["exitCode"] in {0, 7}
-    assert data["commandResults"]["backup"]["backupPath"] == "demo-project_member.ini.bak"
-    assert not conf_dir.joinpath("demo-project_member.ini").exists()
-    assert conf_dir.joinpath("demo-project_member.ini.bak").exists()
-    assert conf_dir.joinpath("demo-project_gateway.ini").exists()
+    assert data["commandResults"]["backup"]["backupPath"] == "member-demo-project.ini.bak"
+    assert not conf_dir.joinpath("member-demo-project.ini").exists()
+    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
+    assert conf_dir.joinpath("gateway-demo-project.ini").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
     record = fake_mysql.tables["sys_supervisor_service"][0]
-    assert record["content_program_name"] == "demo-project_gateway"
-    assert record["config_path"] == "demo-project_gateway.ini"
+    assert record["content_program_name"] == "gateway-demo-project"
+    assert record["config_path"] == "gateway-demo-project.ini"
     assert record["port"] == 9011
     assert record["status"] in ("STOPPED", "UNKNOWN")
     assert record["config_content"] is not None
@@ -999,7 +1027,7 @@ def test_api_update_imported_readonly_service_turns_template_managed(client, tes
         "/admin/api/supervisor/services/legacy_member",
         params={"host": "127.0.0.1"},
         json={
-            **_update_payload("member", 9201),
+            **_update_payload("member", 9201, content_program_name="legacy-member-history"),
             "jobName": "legacy",
             "fileName": "legacy.ini",
             "jarName": "member.jar",
@@ -1012,8 +1040,9 @@ def test_api_update_imported_readonly_service_turns_template_managed(client, tes
     assert record["manage_mode"] == "TEMPLATE_MANAGED"
     assert record["metadata_complete"] == 1
     assert record["parse_warnings"] == "[]"
-    assert record["baseline_content"].startswith("[program:legacy_member]")
-    assert record["config_content"].startswith("[program:legacy_member]")
+    assert record["content_program_name"] == "legacy-member-history"
+    assert record["baseline_content"].startswith("[program:legacy-member-history]")
+    assert record["config_content"].startswith("[program:legacy-member-history]")
 
 
 def test_api_update_service_rejects_file_port_conflict(client, test_environment, seed_user):
@@ -1024,12 +1053,16 @@ def test_api_update_service_rejects_file_port_conflict(client, test_environment,
         test_environment["build_ini"]("manual_other", 9300, job_name="manual", module_name="other"),
         encoding="utf-8",
     )
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
 
     response = client.put(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
-        json=_update_payload("member", 9300),
+        json=_update_payload("member", 9300, content_program_name="member-demo-project"),
         headers=headers,
     )
 
@@ -1041,13 +1074,17 @@ def test_api_update_service_rejects_file_port_conflict(client, test_environment,
 def test_api_update_service_rejects_runtime_port_conflict(client, test_environment, seed_user, fake_supervisor):
     seed_user()
     headers = _login_headers(client)
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
     fake_supervisor.extra_listeners[9444] = "external-java"
 
     response = client.put(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
-        json=_update_payload("member", 9444),
+        json=_update_payload("member", 9444, content_program_name="member-demo-project"),
         headers=headers,
     )
 
@@ -1061,36 +1098,44 @@ def test_api_delete_service_stops_then_removes_config_and_record(client, test_en
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
-    fake_supervisor.states["demo-project_member"] = "RUNNING"
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    fake_supervisor.states["member-demo-project"] = "RUNNING"
 
     response = client.delete(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["contentProgramName"] == "demo-project_member"
-    assert data["deletedConfigPath"] == "demo-project_member.ini"
-    assert data["backupPath"] == "demo-project_member.ini.bak"
+    assert data["contentProgramName"] == "member-demo-project"
+    assert data["deletedConfigPath"] == "member-demo-project.ini"
+    assert data["backupPath"] == "member-demo-project.ini.bak"
     assert data["commandResults"]["stop"]["exitCode"] == 0
-    assert not conf_dir.joinpath("demo-project_member.ini").exists()
-    assert conf_dir.joinpath("demo-project_member.ini.bak").exists()
+    assert not conf_dir.joinpath("member-demo-project.ini").exists()
+    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
     assert fake_mysql.tables["sys_supervisor_service"] == []
-    assert fake_supervisor.states["demo-project_member"] == "STOPPED"
+    assert fake_supervisor.states["member-demo-project"] == "STOPPED"
 
 
 def test_api_delete_service_allows_missing_current_ini(client, test_environment, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
-    conf_dir.joinpath("demo-project_member.ini").unlink()
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    conf_dir.joinpath("member-demo-project.ini").unlink()
 
     response = client.delete(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
@@ -1118,7 +1163,7 @@ def test_api_update_and_delete_reject_archived_service(client, seed_user, fake_m
         "/admin/api/supervisor/services/legacy_svc",
         params={"host": "127.0.0.1"},
         json={
-            **_update_payload("svc", 9500),
+            **_update_payload("svc", 9500, content_program_name="legacy-svc-manual"),
             "jobName": "legacy",
         },
         headers=headers,
@@ -1137,42 +1182,50 @@ def test_api_update_rolls_back_remote_files_when_registry_update_fails(client, t
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
-    original_content = conf_dir.joinpath("demo-project_member.ini").read_text(encoding="utf-8")
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    original_content = conf_dir.joinpath("member-demo-project.ini").read_text(encoding="utf-8")
     fake_mysql.fail_next_supervisor_update = True
 
     response = client.put(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
-        json=_update_payload("gateway", 9600),
+        json=_update_payload("gateway", 9600, content_program_name="gateway-demo-project"),
         headers=headers,
     )
 
     assert response.status_code == 500
     assert response.json()["msg"] == "修改服务写库失败"
-    assert conf_dir.joinpath("demo-project_member.ini").exists()
-    assert not conf_dir.joinpath("demo-project_gateway.ini").exists()
-    assert conf_dir.joinpath("demo-project_member.ini").read_text(encoding="utf-8") == original_content
-    assert fake_mysql.tables["sys_supervisor_service"][0]["content_program_name"] == "demo-project_member"
+    assert conf_dir.joinpath("member-demo-project.ini").exists()
+    assert not conf_dir.joinpath("gateway-demo-project.ini").exists()
+    assert conf_dir.joinpath("member-demo-project.ini").read_text(encoding="utf-8") == original_content
+    assert fake_mysql.tables["sys_supervisor_service"][0]["content_program_name"] == "member-demo-project"
 
 
 def test_api_delete_rolls_back_remote_files_when_registry_delete_fails(client, test_environment, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
-    client.post("/admin/api/supervisor/services", json=_payload("127.0.0.1"), headers=headers)
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
     fake_mysql.fail_next_supervisor_delete = True
 
     response = client.delete(
-        "/admin/api/supervisor/services/demo-project_member",
+        "/admin/api/supervisor/services/member-demo-project",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
 
     assert response.status_code == 500
     assert response.json()["msg"] == "删除服务写库失败"
-    assert conf_dir.joinpath("demo-project_member.ini").exists()
-    assert conf_dir.joinpath("demo-project_member.ini.bak").exists()
+    assert conf_dir.joinpath("member-demo-project.ini").exists()
+    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
 
 

@@ -15,12 +15,13 @@ from app.services.supervisor_registry_service import (
 def _build_create_data(
     *,
     port: int = 9001,
+    job_name: str = "demo-project",
+    module_name: str = "member",
     content_program_name: str = "demo-project_member",
     file_name: str = "demo-project_member.ini",
     config_path: str = "demo-project_member.ini",
     manage_mode: str = MANAGE_MODE_TEMPLATE_MANAGED,
 ):
-    job_name, module_name = content_program_name.rsplit("_", 1)
     return SupervisorRegistryCreateData(
         host_ip="127.0.0.1",
         job_name=job_name,

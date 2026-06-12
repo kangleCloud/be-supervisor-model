@@ -13,7 +13,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from app.core.config import Settings
 from app.core.exceptions import ParamError
 from app.core.security import ensure_safe_name, ensure_safe_program_name, ensure_valid_port, normalize_config_name
-from app.schemas.supervisor import ServiceCreateRequest
+from app.schemas.supervisor import ServiceCreateRequest, ServiceUpdateRequest
 
 
 PORT_PATTERN = re.compile(r"(?:-Dserver\.port=|server\.port=|port=)(?P<port>\d+)")
@@ -93,11 +93,12 @@ class TemplateService:
     def build_config_name(self, config_name: str, program_name: str) -> str:
         return normalize_config_name(config_name, program_name)
 
-    def render(self, payload: ServiceCreateRequest) -> RenderedConfig:
-        """根据新增请求渲染 Supervisor 模板。"""
+    def render(self, payload: ServiceCreateRequest | ServiceUpdateRequest) -> RenderedConfig:
+        """根据请求渲染 Supervisor 模板。"""
         return self.render_service(
             job_name=payload.job_name,
             module_name=payload.module_name,
+            content_program_name=payload.content_program_name,
             java_path=payload.java_path,
             active=payload.active,
             port=payload.port,
@@ -113,6 +114,7 @@ class TemplateService:
         *,
         job_name: str,
         module_name: str,
+        content_program_name: str,
         java_path: str,
         active: str,
         port: int,
@@ -123,7 +125,7 @@ class TemplateService:
         user: str,
     ) -> RenderedConfig:
         """根据结构化字段渲染期望配置内容。"""
-        program_name = self.build_program_name(job_name, module_name)
+        program_name = ensure_safe_program_name(content_program_name)
         normalized_config_name = self.build_config_name(config_name, program_name)
         normalized_jar_name = ensure_safe_name(jar_name or self.build_default_jar_name(module_name), "jarName")
         ensure_valid_port(port)
