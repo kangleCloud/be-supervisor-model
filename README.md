@@ -152,11 +152,13 @@ cp .env.example .env.prod
 数据库启动与迁移规则：
 
 - 应用启动只负责初始化/关闭 Tortoise 连接，不再自动建库、建表或执行 SQL migration
+- 数据库本身必须由外部环境预先创建
 - schema 变更统一通过 Aerich 显式执行
+- 仓库根目录 `migrations/models/` 是唯一迁移来源
 - 首次初始化数据库后，启动应用前先执行：`aerich upgrade`
 - 后续模型变更流程为：`aerich migrate && aerich upgrade`
 - `app/database/migrations/001_init_schema.sql` 保留为历史基线参考，不再由运行时自动执行
-- 默认超级管理员初始化不再由应用启动阶段补种，应通过 Aerich baseline / migration 管理
+- 默认超级管理员初始化由 Aerich baseline 一并落库，不再依赖应用启动补种
 - 其他账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
 
 密码哈希可以使用脚本生成：

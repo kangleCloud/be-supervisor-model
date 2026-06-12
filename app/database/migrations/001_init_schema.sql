@@ -1,3 +1,7 @@
+-- Historical SQL snapshot only.
+-- This file is retained for reference and manual comparison.
+-- Runtime startup no longer executes this file; schema changes are managed by Aerich migrations under migrations/models/.
+
 CREATE TABLE IF NOT EXISTS `sys_user` (
     `id` BIGINT NOT NULL PRIMARY KEY COMMENT 'ID',
     `tenant_id` BIGINT DEFAULT NULL COMMENT '租户ID',

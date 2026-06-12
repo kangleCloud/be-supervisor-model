@@ -1,4 +1,4 @@
-"""数据库启动与认证落库测试。"""
+"""数据库启动、模型覆盖与 Aerich 基线测试。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,6 +6,10 @@ from pathlib import Path
 from app.database.bootstrap import build_sqlite_test_config, close_database, init_database
 from app.database.models.auth import LoginLogModel, LoginTokenModel, UserModel
 from app.database.models.supervisor import SupervisorImportStagingModel, SupervisorServiceModel
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MIGRATIONS_DIR = PROJECT_ROOT / "migrations" / "models"
 
 
 def test_database_init_and_close_with_sqlite(settings, test_environment, run_db):
@@ -81,8 +85,27 @@ def test_models_cover_final_schema_fields():
     } <= staging_model_fields
 
 
-def test_legacy_sql_baseline_is_removed_from_runtime_path():
-    migration_path = Path(__file__).resolve().parents[1] / "app" / "database" / "migrations" / "001_init_schema.sql"
-    assert migration_path.exists()
+def test_aerich_baseline_files_exist_and_are_real():
+    assert MIGRATIONS_DIR.is_dir()
+    assert (MIGRATIONS_DIR / "__init__.py").exists()
+
+    migration_files = sorted(MIGRATIONS_DIR.glob("0_*_init.py"))
+    assert migration_files, "缺少 Aerich baseline migration 文件"
+
+    migration_text = migration_files[0].read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS `sys_user`" in migration_text
+    assert "CREATE TABLE IF NOT EXISTS `sys_login_log`" in migration_text
+    assert "CREATE TABLE IF NOT EXISTS `sys_login_token`" in migration_text
+    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_text
+    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_import_staging`" in migration_text
+    assert "INSERT INTO `sys_user`" in migration_text
+    assert "'admin'" in migration_text
+
+
+def test_legacy_sql_snapshot_is_reference_only():
+    migration_path = PROJECT_ROOT / "app" / "database" / "migrations" / "001_init_schema.sql"
     migration_sql = migration_path.read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_sql
+
+    assert migration_path.exists()
+    assert "Historical SQL snapshot only." in migration_sql
+    assert "Runtime startup no longer executes this file" in migration_sql
