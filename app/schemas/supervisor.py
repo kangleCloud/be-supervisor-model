@@ -109,6 +109,68 @@ class SupervisorImportRequest(BaseModel):
         return self
 
 
+class SupervisorImportStagingQuery(BaseModel):
+    """初始化导入暂存查询参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = Field(..., description="目标主机 IP")
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, value: str) -> str:
+        try:
+            return ensure_safe_host(value)
+        except ParamError as exc:
+            raise ValueError(exc.msg) from exc
+
+
+class SupervisorImportSummaryResponse(BaseModel):
+    """初始化导入汇总。"""
+
+    planned: int
+    imported: int
+    updated: int
+    skipped: int
+
+
+class SupervisorImportItemResponse(BaseModel):
+    """初始化导入单文件结果。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    config_path: str = Field(alias="configPath")
+    file_name: str = Field(alias="fileName")
+    content_program_name: str | None = Field(default=None, alias="contentProgramName")
+    job_name: str | None = Field(default=None, alias="jobName")
+    module_name: str | None = Field(default=None, alias="moduleName")
+    java_path: str | None = Field(default=None, alias="javaPath")
+    active: str | None = Field(default=None)
+    port: int | None = Field(default=None)
+    jar_name: str | None = Field(default=None, alias="jarName")
+    xms: str | None = Field(default=None)
+    xmx: str | None = Field(default=None)
+    user: str | None = Field(default=None)
+    manage_mode: str | None = Field(default=None, alias="manageMode")
+    metadata_complete: bool = Field(alias="metadataComplete")
+    parse_warnings: list[str] = Field(default_factory=list, alias="parseWarnings")
+    result: str
+    message: str
+
+
+class SupervisorImportStagingResponse(BaseModel):
+    """初始化导入暂存恢复响应。"""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    host: str
+    exists: bool
+    batch_id: str | None = Field(default=None, alias="batchId")
+    created_at: str | None = Field(default=None, alias="createdAt")
+    summary: SupervisorImportSummaryResponse
+    items: list[SupervisorImportItemResponse] = Field(default_factory=list)
+
+
 class ServiceListQuery(BaseModel):
     """服务列表分页查询参数。"""
 

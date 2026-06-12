@@ -182,6 +182,41 @@ class SupervisorImportStagingRepository:
         ).order_by("id")
         return list(rows)
 
+    async def find_latest_batch_row(
+        self,
+        *,
+        host_ip: str,
+        operator_id: int,
+        using_db=None,
+    ) -> SupervisorImportStagingModel | None:
+        """查询当前用户当前主机最近一条暂存记录，用于恢复最近批次。"""
+        return await self._query(using_db).filter(
+            host_ip=host_ip,
+            operator_id=operator_id,
+        ).order_by("-create_time", "-id").first()
+
+    async def get_latest_batch(
+        self,
+        *,
+        host_ip: str,
+        operator_id: int,
+        using_db=None,
+    ) -> list[SupervisorImportStagingModel]:
+        """按当前用户当前主机读取最近一批暂存记录。"""
+        latest_row = await self.find_latest_batch_row(
+            host_ip=host_ip,
+            operator_id=operator_id,
+            using_db=using_db,
+        )
+        if latest_row is None:
+            return []
+        return await self.get_batch(
+            batch_id=str(latest_row.batch_id),
+            host_ip=host_ip,
+            operator_id=operator_id,
+            using_db=using_db,
+        )
+
     async def delete_batch(self, batch_id: str, *, using_db=None) -> int:
         return await self._query(using_db).filter(batch_id=batch_id).delete()
 

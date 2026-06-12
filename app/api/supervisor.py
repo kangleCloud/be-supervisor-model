@@ -13,6 +13,8 @@ from app.schemas.supervisor import (
     ServiceListQuery,
     ServiceListRecord,
     ServiceUpdateRequest,
+    SupervisorImportStagingQuery,
+    SupervisorImportStagingResponse,
     StatusRefreshResponse,
     SupervisorImportRequest,
     SupervisorOverviewResponse,
@@ -210,6 +212,20 @@ async def refresh_service_status(host: str = Query(..., description="目标主�
 
 
 # ---- 初始化导入 ----
+
+@router.get(
+    "/imports/staging",
+    summary="查询初始化导入暂存结果",
+    description="按目标主机恢复当前登录用户最近一次 PRECHECK 暂存结果，供页面刷新后继续展示。",
+    response_description="最近一批初始化导入暂存结果。",
+)
+async def get_import_staging(
+    query: SupervisorImportStagingQuery = Depends(),
+    current_user: AuthenticatedUser = Depends(verify_jwt_dependency),
+):
+    result = await _import_service.load_staging(host=query.host, operator_id=current_user.user_id)
+    response = SupervisorImportStagingResponse(**result)
+    return ok(response.model_dump(by_alias=True), msg="查询初始化导入暂存成功")
 
 @router.post(
     "/imports",

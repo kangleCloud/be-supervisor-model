@@ -131,6 +131,15 @@ class SupervisorImportReport:
         }
 
 
+def _format_datetime_text(value: object) -> str | None:
+    """统一格式化批次时间，兼容真实 datetime 与测试场景。"""
+    if value in (None, ""):
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
 def _print_hostname_diagnostic(host: str, executor_type: str, executor) -> None:
     """探测目标主机 hostname 并输出到控制台，不影响主流程。"""
     try:
@@ -221,6 +230,46 @@ class SupervisorImportService:
             operator_id=operator_id,
             operator_name=operator_name,
         )
+
+    async def load_staging(
+        self,
+        *,
+        host: str,
+        operator_id: int,
+    ) -> dict[str, object]:
+        """按当前用户与主机恢复最近一次预检批次，供前端刷新后继续展示。"""
+        safe_host = (await run_blocking(self.host_service.get_host, host)).ip
+        await self.staging_service.delete_expired_batches()
+        records = await self.staging_service.get_latest_batch(host_ip=safe_host, operator_id=operator_id)
+        if not records:
+            return {
+                "host": safe_host,
+                "exists": False,
+                "batchId": None,
+                "createdAt": None,
+                "summary": {
+                    "planned": 0,
+                    "imported": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                },
+                "items": [],
+            }
+
+        batch_id = records[0].batch_id
+        report = self.staging_service.build_report_from_records(
+            host=safe_host,
+            batch_id=batch_id,
+            records=records,
+        )
+        return {
+            "host": safe_host,
+            "exists": True,
+            "batchId": batch_id,
+            "createdAt": _format_datetime_text(records[0].create_time),
+            "summary": report["summary"],
+            "items": report["items"],
+        }
 
     async def _execute_precheck(
         self,

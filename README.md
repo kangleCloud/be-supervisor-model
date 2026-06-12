@@ -174,6 +174,9 @@ python3 scripts/hash_password.py
 初始化导入 API：
 
 ```bash
+curl -X GET 'http://127.0.0.1:18880/admin/api/supervisor/imports/staging?host=10.1.0.104' \
+  -H 'Authorization: Bearer <access-token>'
+
 curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
   -H 'Authorization: Bearer <access-token>' \
   -H 'Content-Type: application/json' \
@@ -194,10 +197,16 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 
 接口规则：
 
+- `GET /admin/api/supervisor/imports/staging?host=...`：按当前登录用户 + 主机恢复最近一批预检暂存数据
+- `GET staging` 无数据时返回 `exists=false`、空 `summary/items`
+- `GET staging` 有数据时返回 `exists=true + batchId + createdAt + summary + items`
+- 前端进入弹窗、切换主机、页面刷新时都应先调 `GET staging`
 - `mode=PRECHECK`：写入暂存表并返回 `batchId + summary + items`，不写 `sys_supervisor_service`
+- `PRECHECK` 永远重新扫描远端，并覆盖该用户该主机上一批暂存
 - `mode=COMMIT`：必须携带上一次 `PRECHECK` 返回的 `batchId`，整批原子写入正式表
 - `PRECHECK` 禁止携带 `batchId`，`COMMIT` 缺少 `batchId` 会直接返回 `400`
 - `PRECHECK` 结果中只要存在任意 `SKIPPED`，后端 `COMMIT` 就会返回 `409`
+- `COMMIT` 成功后删除该批次暂存；失败时正式表回滚，暂存保留供前端继续展示和重试
 - 固定递归扫描 `/etc/supervisord.d` 下全部 `*.ini`
 - 固定排除 `.ini.bak` 和 `.ini.bak.*`
 - 响应 `summary` 固定包含 `planned/imported/updated/skipped`
@@ -250,6 +259,7 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 - 本次 Supervisor 归档与运行操作联动见 [docs/09.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor归档与运行操作联动说明.md)
 - 本次 Supervisor 详情数据库化与单服务同步见 [docs/10.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor详情数据库化与单服务同步说明.md)
 - 本次 Supervisor 本地远端统一增改删见 [docs/11.Supervisor本地远端统一增改删说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/11.Supervisor本地远端统一增改删说明.md)
+- 本次 Supervisor 初始化导入暂存恢复见 [docs/13.Supervisor初始化导入暂存恢复说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/13.Supervisor初始化导入暂存恢复说明.md)
 - 本次 Supervisor 服务器概况真实 API 见 [docs/12.Supervisor服务器概况真实API说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/12.Supervisor服务器概况真实API说明.md)
 
 ## 启动方式

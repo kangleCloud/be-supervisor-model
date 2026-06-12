@@ -118,6 +118,7 @@ class ImportStagingRecord:
     run_user: str | None
     result: str
     message: str | None
+    create_time: datetime | None
 
 
 class SupervisorRegistryService:
@@ -740,6 +741,41 @@ class ImportStagingService:
         rows = await self.repository.get_batch(batch_id=batch_id, host_ip=ensure_safe_host(host_ip), operator_id=operator_id)
         return [self._build_record(row) for row in rows]
 
+    async def get_latest_batch(
+        self,
+        *,
+        host_ip: str,
+        operator_id: int,
+    ) -> list[ImportStagingRecord]:
+        """按主机和当前用户读取最近一批暂存数据。"""
+        rows = await self.repository.get_latest_batch(
+            host_ip=ensure_safe_host(host_ip),
+            operator_id=operator_id,
+        )
+        return [self._build_record(row) for row in rows]
+
+    def build_report_from_records(
+        self,
+        *,
+        host: str,
+        batch_id: str,
+        records: list[ImportStagingRecord],
+    ) -> dict[str, object]:
+        """把暂存记录组装成前端可直接展示的批次结果。"""
+        items = [self._build_item_payload(record) for record in records]
+        summary = {
+            "planned": sum(1 for record in records if record.result != "SKIPPED"),
+            "imported": sum(1 for record in records if record.result == "IMPORTED"),
+            "updated": sum(1 for record in records if record.result == "UPDATED"),
+            "skipped": sum(1 for record in records if record.result == "SKIPPED"),
+        }
+        return {
+            "host": host,
+            "batchId": batch_id,
+            "summary": summary,
+            "items": items,
+        }
+
     async def delete_batch(self, batch_id: str) -> None:
         """删除指定批次的暂存记录。"""
         await self.repository.delete_batch(batch_id)
@@ -892,7 +928,31 @@ class ImportStagingService:
             run_user=_optional_str(row.run_user),
             result=str(row.result),
             message=_optional_str(row.message),
+            create_time=row.create_time,
         )
+
+    @staticmethod
+    def _build_item_payload(record: ImportStagingRecord) -> dict[str, object]:
+        """统一恢复暂存记录的前端字段，避免恢复接口和预检接口字段漂移。"""
+        return {
+            "configPath": record.config_path,
+            "fileName": record.file_name,
+            "contentProgramName": record.content_program_name,
+            "jobName": record.job_name,
+            "moduleName": record.module_name,
+            "javaPath": record.java_path,
+            "active": record.active_profile,
+            "port": record.port,
+            "jarName": record.jar_name,
+            "xms": record.xms,
+            "xmx": record.xmx,
+            "user": record.run_user,
+            "manageMode": MANAGE_MODE_IMPORTED_READONLY,
+            "metadataComplete": record.metadata_complete,
+            "parseWarnings": list(record.parse_warnings),
+            "result": record.result,
+            "message": record.message or "",
+        }
 
 
 def _optional_str(value: object) -> str | None:

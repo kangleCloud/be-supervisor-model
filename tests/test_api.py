@@ -93,12 +93,12 @@ def _import_payload(host: str, mode: str = "PRECHECK", batch_id: str | None = No
     return payload
 
 
-def _login_headers(client) -> dict[str, str]:
+def _login_headers(client, *, username: str = "ops", password: str = "secret") -> dict[str, str]:
     response = client.post(
         "/admin/api/auth/login",
         json={
-            "username": "ops",
-            "password": "secret",
+            "username": username,
+            "password": password,
         },
     )
     assert response.status_code == 200
@@ -512,7 +512,7 @@ def test_api_sync_service_marks_failed_when_config_missing(client, test_environm
     assert detail_data["configContent"] is None
 
 
-def test_api_imports_dry_run_returns_planned_items(client, test_environment, seed_user, fake_mysql):
+def test_api_imports_precheck_returns_planned_items(client, test_environment, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
@@ -542,6 +542,139 @@ def test_api_imports_dry_run_returns_planned_items(client, test_environment, see
     assert data["items"][0]["manageMode"] == "IMPORTED_READONLY"
     assert data["items"][0]["result"] == "PLANNED"
     assert fake_mysql.tables.get("sys_supervisor_service") in (None, [])
+
+
+def test_api_import_staging_returns_empty_when_no_batch(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "host": "127.0.0.1",
+        "exists": False,
+        "batchId": None,
+        "createdAt": None,
+        "summary": {"planned": 0, "imported": 0, "updated": 0, "skipped": 0},
+        "items": [],
+    }
+
+
+def test_api_import_staging_returns_latest_precheck_batch(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    sub_dir = conf_dir / "saas"
+    sub_dir.mkdir()
+    (sub_dir / "legacy-name.ini").write_text(
+        test_environment["build_ini"]("legacy_svc", 9200, job_name="legacy", module_name="svc"),
+        encoding="utf-8",
+    )
+
+    precheck_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    batch_id = precheck_response.json()["data"]["batchId"]
+
+    response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["host"] == "127.0.0.1"
+    assert data["exists"] is True
+    assert data["batchId"] == batch_id
+    assert data["createdAt"] is not None
+    assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 0}
+    assert len(data["items"]) == 1
+    assert data["items"][0]["configPath"] == "saas/legacy-name.ini"
+    assert data["items"][0]["result"] == "PLANNED"
+    assert len(fake_mysql.tables["sys_supervisor_import_staging"]) == 1
+
+
+def test_api_import_precheck_overwrites_previous_staging_batch(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    (conf_dir / "first.ini").write_text(
+        test_environment["build_ini"]("legacy_first", 9200, job_name="legacy", module_name="first"),
+        encoding="utf-8",
+    )
+
+    first_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    first_batch_id = first_response.json()["data"]["batchId"]
+
+    (conf_dir / "second.ini").write_text(
+        test_environment["build_ini"]("legacy_second", 9201, job_name="legacy", module_name="second"),
+        encoding="utf-8",
+    )
+
+    second_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+
+    assert second_response.status_code == 200
+    second_data = second_response.json()["data"]
+    assert second_data["batchId"] != first_batch_id
+    assert second_data["summary"] == {"planned": 2, "imported": 0, "updated": 0, "skipped": 0}
+    assert len(fake_mysql.tables["sys_supervisor_import_staging"]) == 2
+    assert {row["batch_id"] for row in fake_mysql.tables["sys_supervisor_import_staging"]} == {second_data["batchId"]}
+
+    staging_response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert staging_response.status_code == 200
+    staging_data = staging_response.json()["data"]
+    assert staging_data["batchId"] == second_data["batchId"]
+    assert [item["configPath"] for item in staging_data["items"]] == ["first.ini", "second.ini"]
+
+
+def test_api_import_staging_isolated_by_current_user(client, test_environment, seed_user):
+    seed_user()
+    seed_user(user_name="qa", password="secret", nick_name="测试用户")
+    headers = _login_headers(client)
+    qa_headers = _login_headers(client, username="qa", password="secret")
+    conf_dir = test_environment["conf_dir"]
+    (conf_dir / "first.ini").write_text(
+        test_environment["build_ini"]("legacy_first", 9200, job_name="legacy", module_name="first"),
+        encoding="utf-8",
+    )
+
+    precheck_response = client.post(
+        "/admin/api/supervisor/imports",
+        json=_import_payload("127.0.0.1", "PRECHECK"),
+        headers=headers,
+    )
+    assert precheck_response.status_code == 200
+
+    response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=qa_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["exists"] is False
+    assert data["items"] == []
 
 
 def test_api_imports_apply_writes_database(client, test_environment, seed_user, fake_mysql):
@@ -576,6 +709,15 @@ def test_api_imports_apply_writes_database(client, test_environment, seed_user, 
     assert fake_mysql.tables["sys_supervisor_service"][0]["config_path"] == "saas/legacy-name.ini"
     assert fake_mysql.tables["sys_supervisor_service"][0]["manage_mode"] == "IMPORTED_READONLY"
     assert fake_mysql.tables["sys_supervisor_service"][0]["baseline_content"] == baseline_content
+    assert fake_mysql.tables.get("sys_supervisor_import_staging") in (None, [])
+
+    staging_response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert staging_response.status_code == 200
+    assert staging_response.json()["data"]["exists"] is False
 
 
 def test_api_imports_apply_overwrites_template_managed_record(client, test_environment, seed_user, fake_mysql):
@@ -694,6 +836,18 @@ def test_api_imports_skip_program_conflict_and_continue(client, test_environment
     assert response.status_code == 409
     assert response.json()["code"] == 40900
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
+    assert len(fake_mysql.tables["sys_supervisor_import_staging"]) == 2
+
+    staging_response = client.get(
+        "/admin/api/supervisor/imports/staging",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert staging_response.status_code == 200
+    staging_data = staging_response.json()["data"]
+    assert staging_data["exists"] is True
+    assert staging_data["batchId"] == precheck_data["batchId"]
+    assert staging_data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 1}
 
 
 def test_api_rejects_duplicate_registry_record_before_remote_write(client, test_environment, seed_user, fake_mysql):
