@@ -26,6 +26,19 @@ CORS_ALLOW_HEADERS = "Authorization, Content-Type, Accept, X-Requested-With, Cac
 CORS_EXPOSE_HEADERS = "Authorization"
 
 
+def _log_validation_failure(request: Request, exc: Exception, *, label: str) -> None:
+    """统一记录参数校验失败上下文，便于定位前端实际发包与契约不一致的问题。"""
+    errors = exc.errors() if hasattr(exc, "errors") else str(exc)
+    LOGGER.debug(
+        "%s: method=%s url=%s content_type=%s errors=%s",
+        label,
+        request.method,
+        str(request.url),
+        request.headers.get("content-type"),
+        errors,
+    )
+
+
 def _apply_cors_headers(request: Request, response: Response) -> Response:
     """为管理 API 统一补齐跨域响应头。"""
     origin = request.headers.get("origin")
@@ -79,13 +92,13 @@ def create_app() -> FastAPI:
         return fail(exc.http_status, exc.code, exc.msg, exc.data)
 
     @app.exception_handler(RequestValidationError)
-    async def handle_validation_error(_: Request, exc: RequestValidationError):
-        LOGGER.debug("request validation failed: %s", exc)
+    async def handle_validation_error(request: Request, exc: RequestValidationError):
+        _log_validation_failure(request, exc, label="request validation failed")
         return fail(400, 40000, "请求参数非法")
 
     @app.exception_handler(PydanticCoreValidationError)
-    async def handle_pydantic_core_validation_error(_: Request, exc: PydanticCoreValidationError):
-        LOGGER.debug("pydantic-core validation failed: %s", exc)
+    async def handle_pydantic_core_validation_error(request: Request, exc: PydanticCoreValidationError):
+        _log_validation_failure(request, exc, label="pydantic-core validation failed")
         return fail(400, 40000, "请求参数非法")
 
     @app.exception_handler(Exception)

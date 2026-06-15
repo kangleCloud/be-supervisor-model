@@ -1679,6 +1679,84 @@ def test_api_import_rejects_legacy_dry_run_mode(client, seed_user):
     assert response.json()["msg"] == "请求参数非法"
 
 
+def test_api_import_rejects_commit_with_extra_fields_and_logs_validation(client, seed_user, caplog):
+    """验证 COMMIT 混入 staging/UI 字段时会命中 extra=forbid，并输出诊断日志。"""
+    import logging
+
+    seed_user()
+    headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.main")
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json={
+            "host": "127.0.0.1",
+            "mode": "COMMIT",
+            "batchId": "demo-batch",
+            "summary": {"planned": 1},
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40000
+    assert response.json()["msg"] == "请求参数非法"
+    assert any(
+        "request validation failed" in record.message
+        and "/admin/api/supervisor/imports" in record.message
+        and "application/json" in record.message
+        and "summary" in record.message
+        for record in caplog.records
+    )
+
+
+def test_api_import_rejects_commit_without_batch_id(client, seed_user):
+    """验证 COMMIT 缺少 batchId 会在请求模型阶段直接失败。"""
+    seed_user()
+    headers = _login_headers(client)
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        json={
+            "host": "127.0.0.1",
+            "mode": "COMMIT",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40000
+    assert response.json()["msg"] == "请求参数非法"
+
+
+def test_api_import_rejects_commit_with_non_json_content_type(client, seed_user, caplog):
+    """验证错误 Content-Type 不会进入导入业务层，并保留定位日志。"""
+    import logging
+
+    seed_user()
+    headers = {
+        **_login_headers(client),
+        "Content-Type": "text/plain",
+    }
+    caplog.set_level(logging.DEBUG, logger="app.main")
+
+    response = client.post(
+        "/admin/api/supervisor/imports",
+        data='{"host":"127.0.0.1","mode":"COMMIT","batchId":"demo-batch"}',
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == 40000
+    assert response.json()["msg"] == "请求参数非法"
+    assert any(
+        "request validation failed" in record.message
+        and "/admin/api/supervisor/imports" in record.message
+        and "text/plain" in record.message
+        for record in caplog.records
+    )
+
+
 def test_api_list_pagination_defaults(client, test_environment, seed_user, fake_mysql):
     """验证列表分页默认 page=1, pageSize=10。"""
     seed_user()

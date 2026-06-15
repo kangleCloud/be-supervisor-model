@@ -25,6 +25,18 @@ def test_import_request_rejects_commit_without_batch_id():
         SupervisorImportRequest(host="127.0.0.1", mode="COMMIT")
 
 
+def test_import_request_rejects_commit_with_extra_fields():
+    with pytest.raises(ValidationError):
+        SupervisorImportRequest.model_validate(
+            {
+                "host": "127.0.0.1",
+                "mode": "COMMIT",
+                "batchId": "demo-batch",
+                "summary": {},
+            }
+        )
+
+
 def test_import_request_rejects_empty_host():
     with pytest.raises(ValidationError):
         SupervisorImportRequest(host="", mode="PRECHECK")
