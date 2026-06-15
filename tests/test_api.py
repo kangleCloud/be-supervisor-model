@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.core.exceptions import FileOperationError
 from app.executor.base import CommandResult, ExecutorRuntimeError
 from app.executor.local import LocalExecutor
 
@@ -1094,7 +1095,26 @@ def test_api_update_service_rejects_runtime_port_conflict(client, test_environme
     assert response.json()["data"][0]["source"] == "ss -lnutp"
 
 
-def test_api_delete_service_stops_then_removes_config_and_record(client, test_environment, seed_user, fake_mysql, fake_supervisor):
+def test_api_delete_service_rejects_unarchived_record(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+
+    response = client.delete(
+        "/admin/api/supervisor/services/member-demo-project",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["msg"] == "服务未归档，需先归档后删除"
+
+
+def test_api_delete_service_removes_archived_record_and_backup(client, test_environment, seed_user, fake_mysql, fake_supervisor):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
@@ -1104,6 +1124,12 @@ def test_api_delete_service_stops_then_removes_config_and_record(client, test_en
         headers=headers,
     )
     fake_supervisor.states["member-demo-project"] = "RUNNING"
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
 
     response = client.delete(
         "/admin/api/supervisor/services/member-demo-project",
@@ -1115,15 +1141,18 @@ def test_api_delete_service_stops_then_removes_config_and_record(client, test_en
     data = response.json()["data"]
     assert data["contentProgramName"] == "member-demo-project"
     assert data["deletedConfigPath"] == "member-demo-project.ini"
-    assert data["backupPath"] == "member-demo-project.ini.bak"
-    assert data["commandResults"]["stop"]["exitCode"] == 0
+    assert data["deletedRemotePaths"] == ["member-demo-project.ini.bak"]
+    assert data["remoteCleanupStatus"] == "SUCCESS"
+    assert data["warnings"] == []
+    assert data["commandResults"]["deleteBackup"]["deleted"] is True
+    assert data["commandResults"]["deleteConfig"]["deleted"] is False
     assert not conf_dir.joinpath("member-demo-project.ini").exists()
-    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
+    assert not conf_dir.joinpath("member-demo-project.ini.bak").exists()
     assert fake_mysql.tables["sys_supervisor_service"] == []
     assert fake_supervisor.states["member-demo-project"] == "STOPPED"
 
 
-def test_api_delete_service_allows_missing_current_ini(client, test_environment, seed_user, fake_mysql):
+def test_api_delete_service_removes_residual_ini_and_refreshes_supervisor(client, test_environment, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
     conf_dir = test_environment["conf_dir"]
@@ -1132,7 +1161,16 @@ def test_api_delete_service_allows_missing_current_ini(client, test_environment,
         json=_payload("127.0.0.1", content_program_name="member-demo-project"),
         headers=headers,
     )
-    conf_dir.joinpath("member-demo-project.ini").unlink()
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
+    conf_dir.joinpath("member-demo-project.ini").write_text(
+        test_environment["build_ini"]("member-demo-project", 9001),
+        encoding="utf-8",
+    )
 
     response = client.delete(
         "/admin/api/supervisor/services/member-demo-project",
@@ -1141,11 +1179,16 @@ def test_api_delete_service_allows_missing_current_ini(client, test_environment,
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["backupPath"] is None
+    data = response.json()["data"]
+    assert data["remoteCleanupStatus"] == "SUCCESS"
+    assert sorted(data["deletedRemotePaths"]) == ["member-demo-project.ini", "member-demo-project.ini.bak"]
+    assert data["commandResults"]["deleteConfig"]["deleted"] is True
+    assert data["commandResults"]["reread"]["exitCode"] == 0
+    assert data["commandResults"]["update"]["exitCode"] == 0
     assert fake_mysql.tables["sys_supervisor_service"] == []
 
 
-def test_api_update_and_delete_reject_archived_service(client, seed_user, fake_mysql):
+def test_api_update_rejects_archived_service_and_delete_requires_archive(client, seed_user, fake_mysql):
     seed_user()
     headers = _login_headers(client)
     fake_mysql.seed_supervisor_service(
@@ -1158,6 +1201,16 @@ def test_api_update_and_delete_reject_archived_service(client, seed_user, fake_m
         file_name="legacy.ini",
         is_archived=True,
     )
+    fake_mysql.seed_supervisor_service(
+        host_ip="127.0.0.1",
+        job_name="active",
+        module_name="svc",
+        program_name="active_svc",
+        config_name="active.ini",
+        config_path="active.ini",
+        file_name="active.ini",
+        is_archived=False,
+    )
 
     update_response = client.put(
         "/admin/api/supervisor/services/legacy_svc",
@@ -1169,13 +1222,129 @@ def test_api_update_and_delete_reject_archived_service(client, seed_user, fake_m
         headers=headers,
     )
     delete_response = client.delete(
-        "/admin/api/supervisor/services/legacy_svc",
+        "/admin/api/supervisor/services/active_svc",
         params={"host": "127.0.0.1"},
         headers=headers,
     )
 
     assert update_response.status_code == 409
     assert delete_response.status_code == 409
+    assert delete_response.json()["msg"] == "服务未归档，需先归档后删除"
+
+
+def test_api_delete_service_allows_missing_backup_when_record_already_archived(client, test_environment, seed_user, fake_mysql):
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
+    conf_dir.joinpath("member-demo-project.ini.bak").unlink()
+
+    response = client.delete(
+        "/admin/api/supervisor/services/member-demo-project",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["remoteCleanupStatus"] == "SUCCESS"
+    assert data["deletedRemotePaths"] == []
+    assert data["commandResults"]["deleteBackup"]["deleted"] is False
+    assert data["commandResults"]["deleteConfig"]["deleted"] is False
+    assert fake_mysql.tables["sys_supervisor_service"] == []
+
+
+def test_api_delete_service_returns_partial_when_remote_backup_cleanup_fails(
+    client,
+    test_environment,
+    seed_user,
+    fake_mysql,
+    monkeypatch,
+):
+    import app.api.supervisor as api_module
+
+    seed_user()
+    headers = _login_headers(client)
+    conf_dir = test_environment["conf_dir"]
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
+    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
+
+    original_remove = api_module._config_file_service.remove_optional_file_by_config_path
+
+    def fail_remove(host: str, config_path: str, *, allow_backups: bool = False):
+        if config_path.endswith(".bak"):
+            raise FileOperationError("模拟删除备份失败")
+        return original_remove(host, config_path, allow_backups=allow_backups)
+
+    monkeypatch.setattr(api_module._config_file_service, "remove_optional_file_by_config_path", fail_remove)
+
+    response = client.delete(
+        "/admin/api/supervisor/services/member-demo-project",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["remoteCleanupStatus"] == "PARTIAL"
+    assert data["deletedRemotePaths"] == []
+    assert data["warnings"]
+    assert "deleteBackup 失败" in data["warnings"][0]
+    assert data["commandResults"]["deleteBackup"]["deleted"] is False
+    assert data["commandResults"]["deleteBackup"]["error"] == "模拟删除备份失败"
+    assert fake_mysql.tables["sys_supervisor_service"] == []
+    assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
+
+
+def test_api_delete_service_rejects_record_restored_after_archive(client, seed_user):
+    seed_user()
+    headers = _login_headers(client)
+    client.post(
+        "/admin/api/supervisor/services",
+        json=_payload("127.0.0.1", content_program_name="member-demo-project"),
+        headers=headers,
+    )
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
+    restore_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/restore",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert restore_response.status_code == 200
+
+    delete_response = client.delete(
+        "/admin/api/supervisor/services/member-demo-project",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+
+    assert delete_response.status_code == 409
+    assert delete_response.json()["msg"] == "服务未归档，需先归档后删除"
 
 
 def test_api_update_rolls_back_remote_files_when_registry_update_fails(client, test_environment, seed_user, fake_mysql):
@@ -1214,6 +1383,12 @@ def test_api_delete_rolls_back_remote_files_when_registry_delete_fails(client, t
         json=_payload("127.0.0.1", content_program_name="member-demo-project"),
         headers=headers,
     )
+    archive_response = client.post(
+        "/admin/api/supervisor/services/member-demo-project/archive",
+        params={"host": "127.0.0.1"},
+        headers=headers,
+    )
+    assert archive_response.status_code == 200
     fake_mysql.fail_next_supervisor_delete = True
 
     response = client.delete(
@@ -1224,7 +1399,6 @@ def test_api_delete_rolls_back_remote_files_when_registry_delete_fails(client, t
 
     assert response.status_code == 500
     assert response.json()["msg"] == "删除服务写库失败"
-    assert conf_dir.joinpath("member-demo-project.ini").exists()
     assert conf_dir.joinpath("member-demo-project.ini.bak").exists()
     assert len(fake_mysql.tables["sys_supervisor_service"]) == 1
 

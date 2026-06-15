@@ -39,6 +39,16 @@ class _RenderedTarget:
     file_name: str
 
 
+@dataclass(frozen=True)
+class _DeleteCleanupResult:
+    """归档后硬删除的远端清理结果。"""
+
+    deleted_remote_paths: tuple[str, ...]
+    remote_cleanup_status: str
+    command_results: dict[str, object]
+    warnings: tuple[str, ...]
+
+
 class SupervisorMutationService:
     """统一处理本地与远端的创建、修改、删除。"""
 
@@ -266,49 +276,34 @@ class SupervisorMutationService:
         ).model_dump(by_alias=True)
 
     async def delete_service(self, host: str, program_name: str, current_user: AuthenticatedUser) -> dict[str, object]:
-        """删除 Supervisor 服务，必须先停止再删现场和数据库。"""
+        """硬删除已归档服务，先删主表，再清理远端 `.ini/.bak` 残留。"""
         del current_user
         await run_blocking(self.host_service.get_host, host)
         record = await self.registry_service.get_by_content_program_name(host, program_name)
-        self._ensure_not_archived(record, "服务已归档，不能删除")
+        if not record.is_archived:
+            raise ArchiveStateError("服务未归档，需先归档后删除")
 
-        LOGGER.info("删除服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.content_program_name, record.config_path)
-        command_results: dict[str, object] = {
-            "stop": await run_blocking(self.supervisor_service.stop, host, record.content_program_name, True),
-        }
-
-        existed = await run_blocking(self.config_file_service.exists_by_config_path, host, record.config_path)
-        backup_path: str | None = None
-        if existed:
-            backup_result = await run_blocking(self.config_file_service.backup_config_by_config_path, host, record.config_path)
-            command_results["backup"] = backup_result
-            command_results["delete"] = await run_blocking(self.config_file_service.delete_config_by_config_path, host, record.config_path)
-            backup_path = backup_result["backupPath"]
-        else:
-            command_results["backup"] = None
-            command_results["delete"] = None
-            backup_candidate = f"{record.config_path}.bak"
-            if await run_blocking(self.config_file_service.exists_by_config_path, host, backup_candidate, allow_backups=True):
-                backup_path = backup_candidate
-
-        command_results["reread"] = await run_blocking(self.supervisor_service.reread, host)
-        command_results["update"] = await run_blocking(self.supervisor_service.update, host)
+        LOGGER.info("硬删除归档服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.content_program_name, record.config_path)
 
         try:
             await self.registry_service.delete_service(record.id)
         except Exception as exc:
-            rollback_result = await self._rollback_delete(host, record.config_path, existed)
             if isinstance(exc, AppError):
                 raise
-            LOGGER.exception("删除服务写库失败：目标主机=%s，服务名称=%s", host, record.content_program_name, exc_info=exc)
-            raise InternalError("删除服务写库失败", rollback_result) from exc
+            LOGGER.exception("硬删除服务写库失败：目标主机=%s，服务名称=%s", host, record.content_program_name, exc_info=exc)
+            raise InternalError("删除服务写库失败") from exc
+
+        cleanup_result = await self._cleanup_deleted_remote_files(host, record)
 
         return ServiceDeleteResponse(
             host=host,
             contentProgramName=record.content_program_name,
+            deletedRecordId=record.id,
             deletedConfigPath=record.config_path,
-            backupPath=backup_path,
-            commandResults=command_results,
+            deletedRemotePaths=list(cleanup_result.deleted_remote_paths),
+            remoteCleanupStatus=cleanup_result.remote_cleanup_status,
+            commandResults=cleanup_result.command_results,
+            warnings=list(cleanup_result.warnings),
         ).model_dump(by_alias=True)
 
     def _render_target(
@@ -465,18 +460,105 @@ class SupervisorMutationService:
             rollback["rollbackError"] = exc.msg
         return rollback
 
-    async def _rollback_delete(self, host: str, config_path: str, existed: bool) -> dict[str, object]:
-        rollback: dict[str, object] = {"restored": None, "reread": None, "update": None}
-        if existed:
-            try:
-                rollback["restored"] = await run_blocking(self.config_file_service.restore_config_by_config_path, host, config_path)
-            except AppError as exc:
-                rollback["restoreError"] = exc.msg
-                return rollback
+    async def _cleanup_deleted_remote_files(self, host: str, record: SupervisorRegistryRecord) -> _DeleteCleanupResult:
+        """硬删除以数据库删除为准，远端清理失败只返回告警，不回滚主表。"""
+        command_results: dict[str, object] = {}
+        warnings: list[str] = []
+        deleted_remote_paths: list[str] = []
+        backup_path = f"{record.config_path}.bak"
 
+        command_results["deleteBackup"] = await self._delete_remote_file_step(
+            host=host,
+            config_path=backup_path,
+            step_name="deleteBackup",
+            allow_backups=True,
+            warnings=warnings,
+            deleted_remote_paths=deleted_remote_paths,
+        )
+        delete_config_result = await self._delete_remote_file_step(
+            host=host,
+            config_path=record.config_path,
+            step_name="deleteConfig",
+            allow_backups=False,
+            warnings=warnings,
+            deleted_remote_paths=deleted_remote_paths,
+        )
+        command_results["deleteConfig"] = delete_config_result
+        if bool(delete_config_result.get("deleted")):
+            command_results["reread"] = await self._run_cleanup_command(
+                host=host,
+                step_name="reread",
+                runner=self.supervisor_service.reread,
+                warnings=warnings,
+            )
+            command_results["update"] = await self._run_cleanup_command(
+                host=host,
+                step_name="update",
+                runner=self.supervisor_service.update,
+                warnings=warnings,
+            )
+
+        remote_cleanup_status = "SUCCESS" if not warnings else "PARTIAL"
+        if warnings:
+            LOGGER.warning(
+                "硬删除远端清理存在告警：目标主机=%s，服务名称=%s，告警=%s",
+                host,
+                record.content_program_name,
+                "；".join(warnings),
+            )
+        else:
+            LOGGER.info("硬删除归档服务成功：目标主机=%s，服务名称=%s", host, record.content_program_name)
+        return _DeleteCleanupResult(
+            deleted_remote_paths=tuple(deleted_remote_paths),
+            remote_cleanup_status=remote_cleanup_status,
+            command_results=command_results,
+            warnings=tuple(warnings),
+        )
+
+    async def _delete_remote_file_step(
+        self,
+        *,
+        host: str,
+        config_path: str,
+        step_name: str,
+        allow_backups: bool,
+        warnings: list[str],
+        deleted_remote_paths: list[str],
+    ) -> dict[str, object]:
+        """删除单个受控文件；不存在视为已清理，失败仅记录告警。"""
         try:
-            rollback["reread"] = await run_blocking(self.supervisor_service.reread, host)
-            rollback["update"] = await run_blocking(self.supervisor_service.update, host)
+            result = await run_blocking(
+                self.config_file_service.remove_optional_file_by_config_path,
+                host,
+                config_path,
+                allow_backups=allow_backups,
+            )
         except AppError as exc:
-            rollback["rollbackError"] = exc.msg
-        return rollback
+            warnings.append(f"{step_name} 失败: {config_path}，原因: {exc.msg}")
+            return {
+                "configPath": config_path,
+                "deleted": False,
+                "error": exc.msg,
+            }
+        if bool(result.get("deleted")):
+            deleted_remote_paths.append(str(result["configPath"]))
+        return result
+
+    async def _run_cleanup_command(
+        self,
+        *,
+        host: str,
+        step_name: str,
+        runner,
+        warnings: list[str],
+    ) -> dict[str, object]:
+        """清理掉当前 `.ini` 后补做 reread/update；失败按 PARTIAL 返回。"""
+        try:
+            return await run_blocking(runner, host)
+        except AppError as exc:
+            warnings.append(f"{step_name} 失败，原因: {exc.msg}")
+            return {
+                "success": False,
+                "error": exc.msg,
+                "data": exc.data,
+            }

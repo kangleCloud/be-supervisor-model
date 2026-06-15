@@ -460,9 +460,12 @@ class ServiceDeleteResponse(BaseModel):
 
     host: str
     content_program_name: str = Field(alias="contentProgramName")
+    deleted_record_id: int = Field(alias="deletedRecordId")
     deleted_config_path: str = Field(alias="deletedConfigPath")
-    backup_path: str | None = Field(default=None, alias="backupPath")
+    deleted_remote_paths: list[str] = Field(default_factory=list, alias="deletedRemotePaths")
+    remote_cleanup_status: str = Field(alias="remoteCleanupStatus")
     command_results: dict[str, object] = Field(alias="commandResults")
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RuntimeActionResponse(BaseModel):

@@ -387,3 +387,28 @@ class ConfigFileService:
         except ExecutorRuntimeError as exc:
             raise FileOperationError(f"删除配置失败: {config_path}") from exc
         return {"configPath": self._relative_config_path(absolute_path), "removedBackupPath": removed_backup}
+
+    def remove_optional_file_by_config_path(
+        self,
+        host: str,
+        config_path: str,
+        *,
+        allow_backups: bool = False,
+    ) -> dict[str, str | bool]:
+        """按相对路径删除单个受控文件，不存在时返回 deleted=false，供硬删除清理残留复用。"""
+        self._ensure_config_path_write_allowed(host)
+        executor = self.host_service.get_executor(host)
+        absolute_path = self.build_config_path_from_relative(config_path, allow_backups=allow_backups)
+        if not self._path_exists(executor, absolute_path, f"检查配置文件是否存在失败: {absolute_path.name}"):
+            return {
+                "configPath": self._relative_config_path(absolute_path),
+                "deleted": False,
+            }
+        try:
+            executor.remove_file(absolute_path, missing_ok=True)
+        except ExecutorRuntimeError as exc:
+            raise FileOperationError(f"删除受控文件失败: {config_path}") from exc
+        return {
+            "configPath": self._relative_config_path(absolute_path),
+            "deleted": True,
+        }
