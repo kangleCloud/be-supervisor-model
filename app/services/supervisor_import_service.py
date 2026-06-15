@@ -1,12 +1,14 @@
 """Supervisor 初始化导入编排服务。"""
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ConfigNotFoundError, FileOperationError, ParamError
+from app.core.formatting import format_datetime_text
 from app.executor.base import ExecutorRuntimeError
 from app.services.config_file_service import ConfigFileService, RawConfig
 from app.services.host_service import HostService
@@ -35,6 +37,9 @@ IMPORT_PREFLIGHT_KIND_INVENTORY_MISS = "inventory_miss"
 IMPORT_PREFLIGHT_KIND_UNREACHABLE = "unreachable"
 IMPORT_PREFLIGHT_KIND_EMPTY_DIR = "empty_dir"
 IMPORT_PREFLIGHT_KIND_READ_ERROR = "read_error"
+LOGGER = logging.getLogger(__name__)
+
+
 _IMPORT_UNREACHABLE_MARKERS = (
     "unreachable",
     "failed to connect",
@@ -131,37 +136,27 @@ class SupervisorImportReport:
         }
 
 
-def _format_datetime_text(value: object) -> str | None:
-    """统一格式化批次时间，兼容真实 datetime 与测试场景。"""
-    if value in (None, ""):
-        return None
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
-
-
-def _print_hostname_diagnostic(host: str, executor_type: str, executor) -> None:
-    """探测目标主机 hostname 并输出到控制台，不影响主流程。"""
+def _log_hostname_diagnostic(host: str, executor_type: str, executor) -> None:
+    """探测目标主机 hostname 并记录调试日志，不影响主流程。"""
     try:
         result = executor.run_command(["hostname"])
         if result.success:
-            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname={result.stdout.strip()}")
+            LOGGER.debug("[SUPERVISOR_IMPORT_DEBUG] host=%s, executor_type=%s, hostname=%s", host, executor_type, result.stdout.strip())
         else:
-            # hostname 探测只用于诊断，失败时优先打印 ansible 解析出的真实根因，不能退化成 unknown error。
             error_text = result.stderr.strip() or result.stdout.strip() or "unknown error"
-            print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测失败: {error_text}")
+            LOGGER.warning("[SUPERVISOR_IMPORT_DEBUG] host=%s, executor_type=%s, hostname 探测失败: %s", host, executor_type, error_text)
     except ExecutorRuntimeError as exc:
-        print(f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, hostname 探测异常: {exc}")
+        LOGGER.warning("[SUPERVISOR_IMPORT_DEBUG] host=%s, executor_type=%s, hostname 探测异常: %s", host, executor_type, exc)
 
 
-def _print_config_paths_diagnostic(config_paths: list[str]) -> None:
-    """输出扫描到的配置路径到控制台，便于联调定位。"""
+def _log_config_paths_diagnostic(config_paths: list[str]) -> None:
+    """输出扫描到的配置路径到日志，便于联调定位。"""
     if not config_paths:
-        print("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置")
+        LOGGER.info("[SUPERVISOR_IMPORT_DEBUG] 未发现任何 *.ini 配置")
         return
-    print(f"[SUPERVISOR_IMPORT_DEBUG] 发现 {len(config_paths)} 个配置文件:")
+    LOGGER.info("[SUPERVISOR_IMPORT_DEBUG] 发现 %s 个配置文件", len(config_paths))
     for path in config_paths:
-        print(f"  configPath={path}, fileName={PurePosixPath(path).name}")
+        LOGGER.debug("[SUPERVISOR_IMPORT_DEBUG] configPath=%s, fileName=%s", path, PurePosixPath(path).name)
 
 
 def _detect_preflight_failure_kind(message: str) -> str:
@@ -174,18 +169,21 @@ def _detect_preflight_failure_kind(message: str) -> str:
     return IMPORT_PREFLIGHT_KIND_READ_ERROR
 
 
-def _print_preflight_failure_diagnostic(host: str, executor_type: str, kind: str, message: str) -> None:
+def _log_preflight_failure_diagnostic(host: str, executor_type: str, kind: str, message: str) -> None:
     """统一输出前置扫描失败分类，便于从服务端日志直接判断失败类型。"""
-    print(
-        f"[SUPERVISOR_IMPORT_DEBUG] host={host}, executor_type={executor_type}, "
-        f"preflight_failed kind={kind}: {message}"
+    LOGGER.warning(
+        "[SUPERVISOR_IMPORT_DEBUG] host=%s, executor_type=%s, preflight_failed kind=%s: %s",
+        host,
+        executor_type,
+        kind,
+        message,
     )
 
 
-def _diagnostic_finish_and_return(prefix: str, start_time: float, item: SupervisorImportItem) -> SupervisorImportItem:
+def _log_finish_and_return(prefix: str, start_time: float, item: SupervisorImportItem) -> SupervisorImportItem:
     """输出单文件 finish 日志并返回 item。"""
     elapsed = time.time() - start_time
-    print(f"{prefix} finish result={item.result} elapsed={elapsed:.3f}s")
+    LOGGER.debug("%s finish result=%s elapsed=%.3fs", prefix, item.result, elapsed)
     return item
 
 
@@ -238,6 +236,7 @@ class SupervisorImportService:
         operator_id: int,
     ) -> dict[str, object]:
         """按当前用户与主机恢复最近一次预检批次，供前端刷新后继续展示。"""
+        # 这里不主动清空暂存，避免用户刷新页面或重新进入弹窗时丢失上一次 PRECHECK 结果。
         safe_host = (await run_blocking(self.host_service.get_host, host)).ip
         await self.staging_service.delete_expired_batches()
         records = await self.staging_service.get_latest_batch(host_ip=safe_host, operator_id=operator_id)
@@ -266,7 +265,7 @@ class SupervisorImportService:
             "host": safe_host,
             "exists": True,
             "batchId": batch_id,
-            "createdAt": _format_datetime_text(records[0].create_time),
+            "createdAt": format_datetime_text(records[0].create_time),
             "summary": report["summary"],
             "items": report["items"],
         }
@@ -280,12 +279,13 @@ class SupervisorImportService:
         recursive: bool,
     ) -> SupervisorImportReport:
         """扫描远端配置，写入暂存表并返回预检明细。"""
+        # PRECHECK 只做远端只读扫描和暂存写入，不修改正式表，也不清空本次批次结果。
         overall_start = time.time()
         host_config = await run_blocking(self.host_service.get_host, host)
         safe_host = host_config.ip
         executor = await run_blocking(self.host_service.get_executor, safe_host)
         batch_id = self.staging_service.create_batch_id()
-        _print_hostname_diagnostic(safe_host, host_config.executor_type, executor)
+        _log_hostname_diagnostic(safe_host, host_config.executor_type, executor)
 
         await self.staging_service.delete_expired_batches()
         await self.staging_service.clear_operator_host_batches(host_ip=safe_host, operator_id=operator_id)
@@ -322,10 +322,15 @@ class SupervisorImportService:
             skipped=sum(1 for item in result_items if item.result == IMPORT_RESULT_SKIPPED),
         )
         elapsed = time.time() - overall_start
-        print(
-            f"[SUPERVISOR_IMPORT_DEBUG] 导入汇总: "
-            f"host={safe_host}, mode={IMPORT_MODE_PRECHECK}, batchId={batch_id}, "
-            f"total={total}, planned={summary.planned}, skipped={summary.skipped}, elapsed={elapsed:.3f}s"
+        LOGGER.info(
+            "[SUPERVISOR_IMPORT_DEBUG] 导入汇总: host=%s, mode=%s, batchId=%s, total=%s, planned=%s, skipped=%s, elapsed=%.3fs",
+            safe_host,
+            IMPORT_MODE_PRECHECK,
+            batch_id,
+            total,
+            summary.planned,
+            summary.skipped,
+            elapsed,
         )
         return SupervisorImportReport(
             host=safe_host,
@@ -344,6 +349,7 @@ class SupervisorImportService:
         operator_name: str,
     ) -> SupervisorImportReport:
         """按 batchId 把预检批次原子提交到正式表。"""
+        # COMMIT 必须复用 PRECHECK 已落暂存的 batchId；只有整批提交成功后才会删除暂存。
         if not batch_id:
             raise ParamError("COMMIT 模式必须传 batchId")
         safe_host = (await run_blocking(self.host_service.get_host, host)).ip
@@ -391,16 +397,16 @@ class SupervisorImportService:
             )
         except FileOperationError as exc:
             kind = _detect_preflight_failure_kind(exc.msg)
-            _print_preflight_failure_diagnostic(host, executor_type, kind, exc.msg)
+            _log_preflight_failure_diagnostic(host, executor_type, kind, exc.msg)
             if kind == IMPORT_PREFLIGHT_KIND_INVENTORY_MISS:
                 raise ConfigNotFoundError("目标主机未匹配") from exc
             if kind == IMPORT_PREFLIGHT_KIND_UNREACHABLE:
                 raise ConfigNotFoundError("目标主机不可达") from exc
             raise
 
-        _print_config_paths_diagnostic(config_paths)
+        _log_config_paths_diagnostic(config_paths)
         if not config_paths:
-            _print_preflight_failure_diagnostic(
+            _log_preflight_failure_diagnostic(
                 host,
                 executor_type,
                 IMPORT_PREFLIGHT_KIND_EMPTY_DIR,
@@ -423,43 +429,46 @@ class SupervisorImportService:
         file_name = PurePosixPath(config_path).name
         prefix = f"[SUPERVISOR_IMPORT_DEBUG] [{index}/{total}] {config_path}"
 
-        print(f"{prefix} start")
+        LOGGER.debug("%s start", prefix)
 
         # === read ===
         try:
             read_start = time.time()
             raw_config = await run_blocking(self.config_file_service.read_raw_config_by_config_path_direct, host, config_path)
             read_elapsed = time.time() - read_start
-            print(f"{prefix} read_done elapsed={read_elapsed:.3f}s")
+            LOGGER.debug("%s read_done elapsed=%.3fs", prefix, read_elapsed)
         except ConfigNotFoundError as exc:
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except FileOperationError as exc:
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except ExecutorRuntimeError as exc:
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=str(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
         except Exception as exc:  # noqa: BLE001
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item)
 
         # === parse ===
         try:
             parse_start = time.time()
             data = await run_blocking(build_import_registry_data, self.template_service, host, raw_config)
             parse_elapsed = time.time() - parse_start
-            print(
-                f"{prefix} parse_done contentProgramName={data.content_program_name} "
-                f"metadataComplete={data.metadata_complete} warnings={len(data.parse_warnings)} "
-                f"elapsed={parse_elapsed:.3f}s"
+            LOGGER.debug(
+                "%s parse_done contentProgramName=%s metadataComplete=%s warnings=%s elapsed=%.3fs",
+                prefix,
+                data.content_program_name,
+                data.metadata_complete,
+                len(data.parse_warnings),
+                parse_elapsed,
             )
         except AppError as exc:
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
         except Exception as exc:  # noqa: BLE001
             item = self._build_skipped_item(config_path=config_path, file_name=file_name, message=self._stringify_unexpected_error(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
+            return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_item(item, baseline_content=raw_config.content)
 
         # === plan ===
         try:
@@ -471,20 +480,20 @@ class SupervisorImportService:
             plan_elapsed = time.time() - plan_start
             batch_program_paths[normalized.content_program_name] = config_path
             result_so_far = IMPORT_RESULT_PLANNED
-            print(f"{prefix} plan_done result={result_so_far} elapsed={plan_elapsed:.3f}s")
+            LOGGER.debug("%s plan_done result=%s elapsed=%.3fs", prefix, result_so_far, plan_elapsed)
         except AppError as exc:
             skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
-            return _diagnostic_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
+            return _log_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=exc.msg)
         except Exception as exc:  # noqa: BLE001
             skipped = self._build_item_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
-            return _diagnostic_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
+            return _log_finish_and_return(prefix, file_start, skipped), self._build_staging_row_from_data(data, result=IMPORT_RESULT_SKIPPED, message=self._stringify_unexpected_error(exc))
 
         item = self._build_item_from_data(
             normalized,
             result=IMPORT_RESULT_PLANNED,
             message=self._build_precheck_message(existing_by_path),
         )
-        return _diagnostic_finish_and_return(prefix, file_start, item), self._build_staging_row_from_data(
+        return _log_finish_and_return(prefix, file_start, item), self._build_staging_row_from_data(
             normalized,
             result=IMPORT_RESULT_PLANNED,
             message=item.message,

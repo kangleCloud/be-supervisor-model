@@ -257,11 +257,41 @@ curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
 - 本次数据库基线 DDL 整合见 [docs/06.数据库基线DDL整合说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/06.数据库基线DDL整合说明.md)
 - 本次 Supervisor 导入初始化 API 约定见 [docs/07.Supervisor导入初始化API约定.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/07.Supervisor导入初始化API约定.md)
 - 本次 Ansible 输出兼容与告警治理见 [docs/08.Ansible输出兼容与告警治理.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/08.Ansible输出兼容与告警治理.md)
-- 本次 Supervisor 归档与运行操作联动见 [docs/09.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor归档与运行操作联动说明.md)
-- 本次 Supervisor 详情数据库化与单服务同步见 [docs/10.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor详情数据库化与单服务同步说明.md)
-- 本次 Supervisor 本地远端统一增改删见 [docs/11.Supervisor本地远端统一增改删说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/11.Supervisor本地远端统一增改删说明.md)
-- 本次 Supervisor 初始化导入暂存恢复见 [docs/13.Supervisor初始化导入暂存恢复说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/13.Supervisor初始化导入暂存恢复说明.md)
-- 本次 Supervisor 服务器概况真实 API 见 [docs/12.Supervisor服务器概况真实API说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/12.Supervisor服务器概况真实API说明.md)
+- 本次 Supervisor 服务列表分页与数据库查询改造见 [docs/09.Supervisor服务列表分页与数据库查询改造.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor服务列表分页与数据库查询改造.md)
+- 本次 Supervisor 归档与运行操作联动见 [docs/10.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor归档与运行操作联动说明.md)
+- 本次 Supervisor 详情数据库化与单服务同步见 [docs/11.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/11.Supervisor详情数据库化与单服务同步说明.md)
+- 本次 Supervisor 本地远端统一增改删见 [docs/12.Supervisor本地远端统一增改删说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/12.Supervisor本地远端统一增改删说明.md)
+- 本次 Supervisor 服务器概况真实 API 见 [docs/13.Supervisor服务器概况真实API说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/13.Supervisor服务器概况真实API说明.md)
+- 本次 Supervisor 初始化导入暂存恢复见 [docs/14.Supervisor初始化导入暂存恢复说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/14.Supervisor初始化导入暂存恢复说明.md)
+
+## Docker / docker-compose 部署
+
+前提：
+
+- MySQL 继续使用外部已有实例，容器内不内置数据库
+- 宿主机必须存在 `/etc/ansible`，并且 inventory 能按目标主机 IP 直接匹配
+- 容器内的概况、导入、同步、运行、归档能力都会复用这套 `/etc/ansible` 配置
+
+构建镜像：
+
+```bash
+docker build -t be-supervisor-model:latest .
+```
+
+使用 docker-compose 启动：
+
+```bash
+docker compose up -d --build
+```
+
+部署约定：
+
+- `docker-compose.yml` 只部署应用容器，不包含 MySQL
+- 启动命令固定先执行 `python3.12 -m aerich upgrade`，再启动 FastAPI
+- `config.yaml` 通过只读挂载注入容器，并通过 `APP_CONFIG_PATH=/app/config.yaml` 显式指定
+- `/etc/ansible` 通过只读挂载注入容器
+- `.env.prod` 通过 `env_file` 加载
+- 如需预检编排结果，可先执行 `docker compose config`
 
 ## 启动方式
 

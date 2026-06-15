@@ -28,10 +28,10 @@ hosts:
 #    ip: 127.0.0.1
 #    enabled: true
 #    executorType: local
-  - name: web-99
-    ip: 10.1.0.99
-    enabled: true
-    executorType: ansible
+#  - name: web-99
+#    ip: 10.1.0.99
+#    enabled: true
+#    executorType: ansible
   - name: web-104
     ip: 10.1.0.104
     enabled: true

@@ -76,6 +76,7 @@ def _resolve_external_runtime_sources(
     repo_root: Path | None = None,
 ) -> tuple[dict[str, str], dict[str, object], Path]:
     """为 Aerich 和外部脚本复用与应用一致的 .env + config.yaml 解析规则。"""
+    # 优先级固定为：显式环境变量 > .env.dev/.env.prod > config.yaml > 代码默认值。
     actual_repo_root = repo_root or _repo_root()
     raw_environ = dict(environ or os.environ)
     runtime_environ = build_runtime_environ(raw_environ, actual_repo_root)
@@ -159,6 +160,7 @@ async def _load_mysql_supervisor_indexes(connection) -> list[MySQLIndexMetadata]
 
 async def _validate_mysql_supervisor_schema(connection) -> None:
     """MySQL 启动前校验主表结构，发现旧库直接阻止继续运行。"""
+    # 这里故意 fail-fast：代码已经按新 schema 运行时，继续容忍旧列/旧索引只会把问题拖到更隐蔽的业务路径里。
     table_rows = await connection.execute_query_dict(
         """
         SELECT TABLE_NAME
@@ -281,6 +283,7 @@ def get_tortoise_orm(settings: Settings) -> dict[str, object]:
     return build_tortoise_config(settings)
 
 
+# Aerich 与应用共享同一份 Tortoise 配置，避免“应用能连、迁移命令却读了另一套环境变量”的双轨行为。
 TORTOISE_ORM = {
     "connections": {
         "default": _build_aerich_default_dsn(),

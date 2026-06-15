@@ -55,6 +55,7 @@ class AnsibleExecutor(RemoteExecutor):
         return None
 
     def _run_ansible(self, module: str, module_args: str, timeout: int | None = None) -> CommandResult:
+        # inventory 先在控制机做可读性校验；否则缺文件会被 subprocess/ssh 噪音掩盖，定位成本很高。
         command = self._base_args() + ["-m", module, "-a", module_args]
         inventory_error = self._inventory_error_text()
         if inventory_error is not None:
@@ -71,6 +72,7 @@ class AnsibleExecutor(RemoteExecutor):
         except FileNotFoundError as exc:
             return CommandResult(tuple(command), 127, "", str(exc))
         except subprocess.TimeoutExpired as exc:
+            # 超时统一映射为 exit_code=124，供上层按“不可达/命令超时”分类处理。
             return CommandResult(tuple(command), 124, exc.stdout or "", exc.stderr or "ansible 命令执行超时")
 
         stdout = (proc.stdout or "").strip()
@@ -120,6 +122,7 @@ class AnsibleExecutor(RemoteExecutor):
             if not stripped:
                 continue
 
+            # minimal/default callback 会把主机名前缀和真实业务 stdout 混在一起，这里必须先剥掉结果头。
             match = _RESULT_LINE_PATTERN.match(stripped)
             if match is None:
                 payload_lines.extend(self._split_payload_lines(line if reading_result_payload else stripped))

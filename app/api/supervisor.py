@@ -1,6 +1,8 @@
 """Supervisor 管理 API。"""
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.async_utils import run_blocking
@@ -70,6 +72,8 @@ _sync_service = SupervisorSyncService(
 )
 _overview_service = SupervisorOverviewService(_settings, _host_service)
 
+LOGGER = logging.getLogger(__name__)
+
 
 # ---- 主机查询 ----
 
@@ -105,9 +109,8 @@ async def get_host_overview(host: str = Query(..., description="目标主机 IP"
     response_description="分页服务列表。",
 )
 async def list_services(query: ServiceListQuery = Depends()):
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info(
+    # 列表接口固定只查数据库快照，不允许在这里隐式触发任何远端命令。
+    LOGGER.info(
         "查询服务列表：目标主机=%s，关键字=%s，状态=%s，归档筛选=%s，当前页=%s，每页条数=%s",
         query.host, query.keyword, query.status, query.archived, query.page, query.page_size,
     )
@@ -197,14 +200,13 @@ async def delete_service(
     response_description="刷新汇总。",
 )
 async def refresh_service_status(host: str = Query(..., description="目标主机 IP")):
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.info("刷新服务状态：目标主机=%s", host)
+    # 状态刷新属于显式远端读取入口，只有当前端主动点击刷新时才会执行 supervisorctl status。
+    LOGGER.info("刷新服务状态：目标主机=%s", host)
     host_config = await run_blocking(_host_service.get_host, host)
     status_entries = await run_blocking(_supervisor_service.status, host)
     status_tuples = [(entry.program_name, entry.state, entry.pid, entry.uptime) for entry in status_entries]
     updated, missing = await _registry_service.batch_update_status(host, status_tuples)
-    logger.info("刷新服务状态成功：目标主机=%s，更新条数=%s，未匹配条数=%s", host, updated, missing)
+    LOGGER.info("刷新服务状态成功：目标主机=%s，更新条数=%s，未匹配条数=%s", host, updated, missing)
     return ok(
         StatusRefreshResponse(host=host_config.ip, total=len(status_entries), updated=updated, missing=missing).model_dump(by_alias=True),
         msg="刷新服务状态成功",

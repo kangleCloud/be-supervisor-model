@@ -1478,10 +1478,13 @@ def test_api_success_response_keeps_cors_headers(client, seed_user):
     _assert_cors_headers(response)
 
 
-def test_api_import_precheck_prints_hostname_and_file_paths(client, test_environment, seed_user, capsys):
-    """验证 PRECHECK 在服务端 stdout 输出 hostname 探测结果和逐文件诊断。"""
+def test_api_import_precheck_logs_hostname_and_file_paths(client, test_environment, seed_user, caplog):
+    """验证 PRECHECK 通过正式 logger 输出 hostname 探测结果和逐文件诊断。"""
+    import logging
+
     seed_user()
     headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.services.supervisor_import_service")
     conf_dir = test_environment["conf_dir"]
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
@@ -1497,21 +1500,19 @@ def test_api_import_precheck_prints_hostname_and_file_paths(client, test_environ
     )
 
     assert response.status_code == 200
-    captured = capsys.readouterr().out
-    assert "[SUPERVISOR_IMPORT_DEBUG]" in captured
-    assert "host=127.0.0.1" in captured
-    assert "hostname=" in captured or "探测失败" in captured or "探测异常" in captured
-    assert "saas/legacy-name.ini" in captured
-    # 验证逐文件诊断阶段输出
-    assert "start" in captured
-    assert "read_done" in captured
-    assert "parse_done" in captured
-    assert "plan_done" in captured
-    assert "finish" in captured
-    # 验证汇总日志
-    assert "导入汇总" in captured
-    assert "planned=1" in captured
-    assert "elapsed=" in captured
+    messages = [record.message for record in caplog.records]
+    assert any("[SUPERVISOR_IMPORT_DEBUG]" in message for message in messages)
+    assert any("host=127.0.0.1" in message for message in messages)
+    assert any("hostname=" in message or "探测失败" in message or "探测异常" in message for message in messages)
+    assert any("saas/legacy-name.ini" in message for message in messages)
+    assert any("start" in message for message in messages)
+    assert any("read_done" in message for message in messages)
+    assert any("parse_done" in message for message in messages)
+    assert any("plan_done" in message for message in messages)
+    assert any("finish" in message for message in messages)
+    assert any("导入汇总" in message for message in messages)
+    assert any("planned=1" in message for message in messages)
+    assert any("elapsed=" in message for message in messages)
 
 
 def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
@@ -1530,10 +1531,13 @@ def test_api_import_empty_dir_returns_404(client, test_environment, seed_user):
     assert response.json()["msg"] == "远端目录下无可用配置文件"
 
 
-def test_api_import_inventory_miss_returns_404(client, test_environment, seed_user, monkeypatch, capsys):
+def test_api_import_inventory_miss_returns_404(client, test_environment, seed_user, monkeypatch, caplog):
     """验证导入前置 inventory 未匹配时返回 404。"""
+    import logging
+
     seed_user()
     headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.services.supervisor_import_service")
     from app.services.host_service import HostService
 
     fake_executor = _FakeImportRemoteExecutor(
@@ -1551,15 +1555,18 @@ def test_api_import_inventory_miss_returns_404(client, test_environment, seed_us
     assert response.status_code == 404
     assert response.json()["code"] == 40400
     assert response.json()["msg"] == "目标主机未匹配"
-    captured = capsys.readouterr().out
-    assert "hostname 探测失败: 目标主机未匹配" in captured
-    assert "preflight_failed kind=inventory_miss" in captured
+    messages = [record.message for record in caplog.records]
+    assert any("hostname 探测失败: 目标主机未匹配" in message for message in messages)
+    assert any("preflight_failed kind=inventory_miss" in message for message in messages)
 
 
-def test_api_import_unreachable_returns_404(client, test_environment, seed_user, monkeypatch, capsys):
+def test_api_import_unreachable_returns_404(client, test_environment, seed_user, monkeypatch, caplog):
     """验证导入前置 SSH/UNREACHABLE 失败时返回统一 404。"""
+    import logging
+
     seed_user()
     headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.services.supervisor_import_service")
     from app.services.host_service import HostService
 
     fake_executor = _FakeImportRemoteExecutor(
@@ -1582,15 +1589,18 @@ def test_api_import_unreachable_returns_404(client, test_environment, seed_user,
     assert response.status_code == 404
     assert response.json()["code"] == 40400
     assert response.json()["msg"] == "目标主机不可达"
-    captured = capsys.readouterr().out
-    assert "Connection timed out" in captured
-    assert "preflight_failed kind=unreachable" in captured
+    messages = [record.message for record in caplog.records]
+    assert any("Connection timed out" in message for message in messages)
+    assert any("preflight_failed kind=unreachable" in message for message in messages)
 
 
-def test_api_import_hostname_failure_does_not_block_success(client, test_environment, seed_user, monkeypatch, capsys):
+def test_api_import_hostname_failure_does_not_block_success(client, test_environment, seed_user, monkeypatch, caplog):
     """验证 hostname 探测失败只记诊断，不影响后续扫描成功。"""
+    import logging
+
     seed_user()
     headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.services.supervisor_import_service")
     conf_dir = test_environment["conf_dir"]
     config_path = conf_dir / "saas" / "legacy-name.ini"
     config_path.parent.mkdir()
@@ -1619,16 +1629,19 @@ def test_api_import_hostname_failure_does_not_block_success(client, test_environ
     data = response.json()["data"]
     assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 0}
     assert data["items"][0]["configPath"] == "saas/legacy-name.ini"
-    captured = capsys.readouterr().out
-    assert "hostname 探测失败" in captured
-    assert "Connection timed out" in captured
-    assert "导入汇总" in captured
+    messages = [record.message for record in caplog.records]
+    assert any("hostname 探测失败" in message for message in messages)
+    assert any("Connection timed out" in message for message in messages)
+    assert any("导入汇总" in message for message in messages)
 
 
-def test_api_import_skips_parse_error_and_continues(client, test_environment, seed_user, capsys):
+def test_api_import_skips_parse_error_and_continues(client, test_environment, seed_user, caplog):
     """验证解析失败的文件被 SKIPPED，其余文件正常处理。"""
+    import logging
+
     seed_user()
     headers = _login_headers(client)
+    caplog.set_level(logging.DEBUG, logger="app.services.supervisor_import_service")
     conf_dir = test_environment["conf_dir"]
     sub_dir = conf_dir / "saas"
     sub_dir.mkdir()
@@ -1649,18 +1662,16 @@ def test_api_import_skips_parse_error_and_continues(client, test_environment, se
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["summary"] == {"planned": 1, "imported": 0, "updated": 0, "skipped": 1}
-    # items 按 configPath 升序排列，bad.ini 在 saas/valid.ini 之前
     assert data["items"][0]["configPath"] == "bad.ini"
     assert data["items"][0]["result"] == "SKIPPED"
     assert data["items"][1]["configPath"] == "saas/valid.ini"
     assert data["items"][1]["result"] == "PLANNED"
-    # 诊断输出也包含两个文件的日志
-    captured = capsys.readouterr().out
-    assert "saas/valid.ini" in captured
-    assert "bad.ini" in captured
-    assert "导入汇总" in captured
-    assert "planned=1" in captured
-    assert "skipped=1" in captured
+    messages = [record.message for record in caplog.records]
+    assert any("saas/valid.ini" in message for message in messages)
+    assert any("bad.ini" in message for message in messages)
+    assert any("导入汇总" in message for message in messages)
+    assert any("planned=1" in message for message in messages)
+    assert any("skipped=1" in message for message in messages)
 
 
 def test_api_import_rejects_legacy_dry_run_mode(client, seed_user):
@@ -1880,20 +1891,30 @@ def test_api_list_pure_database_no_remote_call(client, test_environment, seed_us
         host_ip="127.0.0.1", job_name="demo", module_name="svc", program_name="demo_svc",
         config_name="svc.ini",
     )
-    from app.services.supervisor_manager import SupervisorManager
-    original_list = SupervisorManager.list_services_page
-    called_remote = False
 
-    def assert_no_remote(*args, **kwargs):
-        nonlocal called_remote
-        called_remote = True
-        return {"records": [], "page": 1, "pageSize": 10, "total": 0, "pages": 0}
+    from app.services.host_service import HostService
+    from app.services.supervisor_service import SupervisorService
+    from app.services.config_file_service import ConfigFileService
 
-    monkeypatch.setattr(SupervisorManager, "list_services_page", assert_no_remote)
+    monkeypatch.setattr(
+        HostService,
+        "get_executor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("列表接口不应创建远端执行器")),
+    )
+    monkeypatch.setattr(
+        SupervisorService,
+        "status",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("列表接口不应执行 supervisorctl status")),
+    )
+    monkeypatch.setattr(
+        ConfigFileService,
+        "read_raw_config_optional_by_config_path",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("列表接口不应读取远端配置")),
+    )
 
-    # 即使 mock 让列表返回空，也不应抛出异常
     response = client.get("/admin/api/supervisor/services", params={"host": "127.0.0.1"}, headers=headers)
     assert response.status_code == 200
+    assert response.json()["data"]["total"] == 1
 
 
 def test_api_status_refresh_updates_database(client, test_environment, seed_user, fake_mysql, fake_supervisor):

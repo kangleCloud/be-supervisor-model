@@ -6,16 +6,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.exceptions import ParamError
+from app.core.formatting import format_datetime_text
 from app.core.security import ensure_safe_host, ensure_safe_name, ensure_safe_program_name, ensure_valid_port
-
-
-def _format_datetime_text(value: object) -> str | None:
-    """兼容真实 MySQL datetime 和测试夹具中的字符串时间。"""
-    if value in (None, ""):
-        return None
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
 
 
 class _ServiceMutationRequestFields(BaseModel):
@@ -272,9 +264,9 @@ class ServiceListRecord(BaseModel):
             pid=record.pid,
             uptime=record.uptime,
             isArchived=record.is_archived,
-            archivedAt=_format_datetime_text(record.archived_at),
-            restoredAt=_format_datetime_text(record.restored_at),
-            updateTime=_format_datetime_text(record.update_time),
+            archivedAt=format_datetime_text(record.archived_at),
+            restoredAt=format_datetime_text(record.restored_at),
+            updateTime=format_datetime_text(record.update_time),
         )
 
 
@@ -412,12 +404,12 @@ class ServiceDetailResponse(BaseModel):
             configContent=record.config_content,
             backupConfigContent=record.backup_config_content,
             isArchived=record.is_archived,
-            archivedAt=_format_datetime_text(record.archived_at),
-            restoredAt=_format_datetime_text(record.restored_at),
-            lastSyncAt=_format_datetime_text(record.last_sync_at),
+            archivedAt=format_datetime_text(record.archived_at),
+            restoredAt=format_datetime_text(record.restored_at),
+            lastSyncAt=format_datetime_text(record.last_sync_at),
             syncStatus=record.sync_status,
             syncError=record.sync_error,
-            updatedAt=_format_datetime_text(record.update_time),
+            updatedAt=format_datetime_text(record.update_time),
         )
 
 

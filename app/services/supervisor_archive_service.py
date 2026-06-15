@@ -6,6 +6,7 @@ from datetime import datetime
 
 from app.core.async_utils import run_blocking
 from app.core.exceptions import AppError, ArchiveStateError
+from app.core.formatting import format_datetime_text
 from app.schemas.supervisor import ArchiveActionResponse
 from app.services.config_file_service import ConfigFileService
 from app.services.host_service import HostService
@@ -14,15 +15,6 @@ from app.services.supervisor_service import SupervisorService
 
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _format_datetime_text(value: object) -> str | None:
-    """兼容真实 MySQL datetime 和测试夹具中的字符串时间。"""
-    if value in (None, ""):
-        return None
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
 
 
 class SupervisorArchiveService:
@@ -74,7 +66,7 @@ class SupervisorArchiveService:
             contentProgramName=record.content_program_name,
             isArchived=True,
             archivedAt=archived_at.strftime("%Y-%m-%d %H:%M:%S"),
-            restoredAt=_format_datetime_text(record.restored_at),
+            restoredAt=format_datetime_text(record.restored_at),
             status="STOPPED",
             commandResult={
                 "stop": stop_result,
@@ -121,7 +113,7 @@ class SupervisorArchiveService:
             host=host,
             contentProgramName=record.content_program_name,
             isArchived=False,
-            archivedAt=_format_datetime_text(record.archived_at),
+            archivedAt=format_datetime_text(record.archived_at),
             restoredAt=restored_at.strftime("%Y-%m-%d %H:%M:%S"),
             status=status,
             commandResult={
