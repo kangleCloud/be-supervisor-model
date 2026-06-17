@@ -20,6 +20,7 @@ class SupervisorDetailService:
 
     async def get_service_detail(self, host: str, program_name: str) -> dict[str, object]:
         """返回数据库中的单服务详情快照。"""
+        # 详情接口默认只查数据库，不在这里隐式读取远端 .ini 或执行 supervisorctl。
         host_config = await run_blocking(self.host_service.get_host, host)
         record = await self.registry_service.get_by_content_program_name(host, program_name)
         return ServiceDetailResponse.from_record(record, host_name=host_config.name).model_dump(by_alias=True)

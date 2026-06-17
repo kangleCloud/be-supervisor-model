@@ -25,6 +25,7 @@ def _prepare_repo_files(tmp_path: Path) -> Path:
                 "  host: 0.0.0.0",
                 "  port: 18881",
                 "  logLevel: info",
+                f"  logPath: {repo_root / 'logs' / 'app.log'}",
                 "database:",
                 "  host: 106.54.205.33",
                 "  port: 3306",
@@ -77,6 +78,7 @@ def test_load_settings_reads_dev_env_file(monkeypatch, tmp_path):
     settings = config_module.load_settings({"APP_ENV": "dev"})
 
     assert settings.app.port == 18881
+    assert settings.app.log_path == (repo_root / "logs" / "app.log").resolve()
     assert settings.database.host == "106.54.205.33"
     assert settings.database.password == "dev#password"
     assert settings.auth.jwt_secret == "dev-secret-0123456789abcdef"
@@ -105,12 +107,14 @@ def test_process_env_overrides_env_file(monkeypatch, tmp_path):
         {
             "APP_ENV": "dev",
             "APP_PORT": "38881",
+            "APP_LOG_PATH": str((repo_root / "override-logs" / "runtime.log").resolve()),
             "DATABASE_PASSWORD": "explicit#password",
             "JWT_SECRET": "explicit-secret-0123456789abcdef",
         }
     )
 
     assert settings.app.port == 38881
+    assert settings.app.log_path == (repo_root / "override-logs" / "runtime.log").resolve()
     assert settings.database.password == "explicit#password"
     assert settings.auth.jwt_secret == "explicit-secret-0123456789abcdef"
 
@@ -193,6 +197,20 @@ def test_load_settings_without_app_env_reads_config_yaml_and_requires_process_se
 
     with pytest.raises(ValueError, match="JWT_SECRET 不能为空"):
         config_module.load_settings({})
+
+
+def test_load_settings_allows_empty_log_path(monkeypatch, tmp_path):
+    repo_root = _prepare_repo_files(tmp_path)
+    config_text = (repo_root / "config.yaml").read_text(encoding="utf-8").replace(
+        f"  logPath: {repo_root / 'logs' / 'app.log'}",
+        "  logPath: ''",
+    )
+    (repo_root / "config.yaml").write_text(config_text, encoding="utf-8")
+    monkeypatch.setattr(config_module, "_repo_root", lambda: repo_root)
+
+    settings = config_module.load_settings({"APP_ENV": "dev"})
+
+    assert settings.app.log_path is None
 
 
 def test_run_script_requires_env_argument():

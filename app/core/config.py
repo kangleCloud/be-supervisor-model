@@ -44,6 +44,7 @@ class AppSettings:
     host: str
     port: int
     log_level: str
+    log_path: Path | None
 
 
 @dataclass(frozen=True)
@@ -209,6 +210,30 @@ def _optional_path(
     return Path(os.path.normpath(str(path)))
 
 
+def _optional_file_path(
+    environ: Mapping[str, str],
+    env_key: str,
+    config_data: Mapping[str, Any],
+    config_keys: tuple[str, ...],
+) -> Path | None:
+    """读取可选文件路径；为空时返回 None，非空时必须是绝对路径。"""
+    env_value = (environ.get(env_key) or "").strip()
+    if env_value:
+        raw_value = env_value
+    else:
+        config_value = _get_nested(config_data, *config_keys, default=None)
+        if config_value in (None, ""):
+            return None
+        raw_value = str(config_value).strip()
+        if not raw_value:
+            return None
+
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{env_key} 必须是绝对路径")
+    return Path(os.path.normpath(str(path)))
+
+
 def _load_hosts(config_data: Mapping[str, Any], default_executor_type: str) -> tuple[HostConfig, ...]:
     raw_hosts = _get_nested(config_data, "hosts", default=DEFAULT_HOSTS)
     if not isinstance(raw_hosts, list):
@@ -251,6 +276,8 @@ def load_settings(environ: Optional[Mapping[str, str]] = None) -> Settings:
         host=_optional_string(runtime_environ, "APP_HOST", config_data, ("app", "host"), DEFAULT_APP_HOST),
         port=_optional_int(runtime_environ, "APP_PORT", config_data, ("app", "port"), DEFAULT_APP_PORT),
         log_level=_optional_log_level(runtime_environ, "APP_LOG_LEVEL", config_data, ("app", "logLevel"), DEFAULT_APP_LOG_LEVEL),
+        # 日志文件路径默认可不配；容器部署时可通过 APP_LOG_PATH 指向挂载目录实现宿主机落盘。
+        log_path=_optional_file_path(runtime_environ, "APP_LOG_PATH", config_data, ("app", "logPath")),
     )
 
     database_settings = DatabaseSettings(

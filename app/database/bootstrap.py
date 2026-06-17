@@ -236,6 +236,7 @@ async def init_database(settings: Settings, *, tortoise_config: dict[str, object
     """初始化 ORM 连接，并在 MySQL 场景下提前阻断旧 schema 继续运行。"""
     await Tortoise.init(config=tortoise_config or build_tortoise_config(settings))
     try:
+        # 运行期不再偷偷修库；发现 schema 落后时直接阻止继续启动，避免业务在半兼容状态下写脏数据。
         await _validate_runtime_schema()
     except Exception:
         await close_database()

@@ -10,11 +10,18 @@ services:
     environment:
       APP_ENV: prod
       APP_CONFIG_PATH: /app/config.yaml
+      APP_LOG_PATH: /var/log/be-supervisor-model/app.log
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - /etc/ansible:/etc/ansible:ro
+      - ${HOST_LOG_DIR:-/var/log/be-supervisor-model}:/var/log/be-supervisor-model
     ports:
       - "18881:18881"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     command: >-
       bash -lc "python3.12 -m aerich upgrade &&
-      python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 18880"
+      bash ./scripts/run.sh \"$APP_ENV\""

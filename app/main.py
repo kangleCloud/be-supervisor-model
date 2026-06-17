@@ -54,7 +54,7 @@ def _apply_cors_headers(request: Request, response: Response) -> Response:
 def create_app() -> FastAPI:
     """创建并装配应用。"""
     settings = get_settings()
-    configure_logging(settings.app.log_level)
+    configure_logging(settings.app.log_level, log_path=settings.app.log_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

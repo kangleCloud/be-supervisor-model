@@ -36,6 +36,7 @@ class SupervisorSyncService:
 
     async def sync_service(self, host: str, program_name: str) -> dict[str, object]:
         """读取远端状态与配置，并把结果回写数据库详情快照。"""
+        # 详情同步是唯一允许主动回读远端 .ini/.bak 和 supervisor 状态的入口。
         record = await self._load_record(host, program_name)
         sync_time = datetime.now()
         warnings: list[str] = []

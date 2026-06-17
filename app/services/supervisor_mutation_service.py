@@ -106,6 +106,7 @@ class SupervisorMutationService:
             target.rendered.content,
             target.rendered.program_name,
         )
+        # 只有现场写入成功后才执行 reread/update，避免数据库先成功而远端现场未生效。
         reread_result = await run_blocking(self.supervisor_service.reread, payload.host)
         update_result = await run_blocking(self.supervisor_service.update, payload.host)
 
@@ -286,6 +287,7 @@ class SupervisorMutationService:
         LOGGER.info("硬删除归档服务：目标主机=%s，服务名称=%s，配置路径=%s", host, record.content_program_name, record.config_path)
 
         try:
+            # 删除语义以数据库记录消失为准；远端残留清理失败时只返回告警，不回滚主表删除。
             await self.registry_service.delete_service(record.id)
         except Exception as exc:
             if isinstance(exc, AppError):
@@ -407,6 +409,7 @@ class SupervisorMutationService:
         return entry.state, entry.pid, entry.uptime
 
     async def _rollback_create(self, host: str, config_path: str) -> dict[str, object]:
+        # 新增服务的补偿只负责清理刚写入的配置并回滚 reread/update，避免留下“现场已写、主表失败”的分裂状态。
         rollback: dict[str, object] = {"configRemoved": False, "reread": None, "update": None}
         if await run_blocking(self.config_file_service.exists_by_config_path, host, config_path):
             try:
@@ -430,6 +433,7 @@ class SupervisorMutationService:
         previous_config_path: str,
         target_config_path: str,
     ) -> dict[str, object]:
+        # 修改失败时优先恢复旧配置，再刷新 supervisor 现场；不额外尝试重建更多中间状态。
         rollback: dict[str, object] = {"targetRemoved": False, "restored": None, "reread": None, "update": None}
         if target_config_path != previous_config_path and await run_blocking(
             self.config_file_service.exists_by_config_path,

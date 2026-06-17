@@ -1,110 +1,39 @@
 # be-supervisor-model
 
-`be-supervisor-model` 是一个基于 FastAPI 的运维管理服务，用于统一管理目标主机上的 Supervisor 配置。
+`be-supervisor-model` 是一个基于 FastAPI 的运维管理服务，用于统一管理白名单主机上的 Supervisor 配置、运行状态和初始化导入流程。
 
-当前版本包含两类能力：
+## 当前能力
 
 - 登录鉴权：登录、查询当前用户、退出登录
-- Supervisor 管理：查询主机、查询主机实时概况、分页查询纳管服务、查询服务详情、同步单服务远端快照、执行初始化导入、创建/修改/删除服务、启动/停止/重启、归档/还原
+- 主机管理：查询主机白名单、读取主机实时概况
+- 服务管理：列表、详情、单服务同步、状态刷新
+- 初始化导入：`GET staging` + `PRECHECK -> COMMIT`
+- 服务变更：新增、修改、归档、还原、硬删除
+- 运行操作：`start / stop / restart`
 
-Supervisor 配置主数据落在 MySQL 8 的 `sys_supervisor_service` 表中；远端 `/etc/supervisord.d` 及其子目录中的 `*.ini` 是实际生效结果；详情和列表默认只读数据库，远端状态与配置快照通过显式同步接口或批量状态刷新接口写回数据库。
+## 核心模型
 
-## 技术栈
+- 主数据落在 MySQL `sys_supervisor_service`
+- 远端现场固定为 `/etc/supervisord.d` 及其子目录
+- 服务列表和详情默认只查数据库
+- 远端状态和配置快照只通过显式接口同步
+- 目标主机必须来自 `hosts` 白名单
+- 远端执行统一通过 `local` 或 `ansible` 两类执行器
 
-- Python 3.12
-- FastAPI
-- Pydantic
-- Jinja2
-- PyYAML
-- PyJWT
-- bcrypt
-- pytest
-- Tortoise-ORM
-- Aerich
-- asyncmy
-- aiosqlite
+数据库真实列统一以这三组字段为主：
 
-## 执行模型
-
-服务支持两类执行方式，并由主机配置决定：
-
-- `local`：当管理服务与被管理应用在同一台服务器时，直接在本机操作配置文件并执行 `supervisorctl`
-- `ansible`：当需要管理远程主机时，通过 `ansible` ad-hoc 命令执行远端配置读取、模板写入/删除、运行操作与归档联动
-
-配置文件读取来源取决于执行器与部署位置：
-
-- `local` 场景下，配置文件直接从本机读取
-- `ansible` 场景下，配置文件通过远程服务器读取
-
-远端 Ansible 输出约束：
-
-- 远端只读执行不再依赖已弃用的 `ansible -o` / `oneline` 输出语义
-- 服务端固定使用受支持的 `minimal` callback 读取业务 stdout
-- `FAILED/UNREACHABLE` 结果头中的真实失败正文会被提取并用于服务端诊断
-- Ansible warning/deprecation 噪音只在服务端日志中处理，不向前端接口响应透传
-
-当前项目强约束：
-
-- 本地主机和远端 `ansible` 主机都允许创建、修改未归档服务；硬删除只允许针对已归档记录
-- 归档后的硬删除会先删数据库记录，再清理远端 `.ini/.bak` 残留；远端清理失败只返回告警，不回滚主表删除
-- 远端 `ansible` 主机允许执行读取、`start/stop/restart`、归档/还原
-- 远端归档/还原只允许操作数据库已纳管记录对应的 `configPath`
-- 允许通过导入 API 或导入脚本只读扫描远端配置并写入数据库，但绝不修改服务器现场
-- 已归档记录禁止直接修改，但允许执行硬删除；未归档记录不能直接删除，必须先归档
-- 远端主机统一以 IP 作为唯一标识，`ansible` 执行器固定使用 `host.ip` 作为 inventory pattern，不再支持逻辑别名
-
-配置文件默认目录：
-
-```text
-/etc/supervisord.d
-```
-
-仅允许操作：
-
-- `*.ini`
-- `*.ini.bak`
-- `*.ini.bak.*`
-
-主数据字段语义：
-
-- `configPath`：相对 `/etc/supervisord.d` 的真实配置路径，作为现场定位键
-- `fileName`：配置文件 basename
-- `contentProgramName`：配置内容 `[program:*]` 中的名称
-- `manageMode`：`TEMPLATE_MANAGED` 或 `IMPORTED_READONLY`
-- `isArchived` / `archivedAt` / `restoredAt`：归档状态及时间戳，服务列表默认只展示 `isArchived=false`
-
-数据库真实列只保留 `config_path/file_name/content_program_name`；展示与接口语义统一以 `configPath/fileName/contentProgramName` 为主，旧的 `configName/programName` 不再作为数据库列存在。
-
-## Supervisor 模板
-
-模板文件位于 [app/templates/supervisor_program.ini.j2](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/app/templates/supervisor_program.ini.j2)。
-
-默认规则：
-
-- create/update 时 `contentProgramName` 由调用方手动输入，服务端不再根据 `jobName/moduleName` 反推或校验一致性
-- `fileName` 为空时，默认回退为 `{contentProgramName}.ini`
-- `jarName` 为空时自动使用 `{moduleName}.jar`
-- 以下 Supervisor 参数是系统固定策略，前端不需要也不能传入：
-  - `autostart=true`
-  - `startsecs=10`
-  - `autorestart=true`
-  - `startretries=3`
-  - `priority=999`
-  - `redirect_stderr=true`
-  - `stdout_logfile_maxbytes=1GB`
-  - `stdout_logfile_backups=1`
-  - `stopasgroup=false`
-  - `killasgroup=false`
+- `config_path`：相对 `/etc/supervisord.d` 的真实定位路径
+- `file_name`：配置文件 basename
+- `content_program_name`：配置内容 `[program:*]` 里的名称
 
 ## 配置
 
-当前推荐配置范式：
+推荐范式：
 
-- `config.yaml`：承载主配置
-- `.env.dev`：开发环境敏感覆盖项
-- `.env.prod`：生产环境敏感覆盖项
+- `config.yaml`：主配置
+- `.env.dev` / `.env.prod`：敏感值
 
-复制配置模板：
+复制模板：
 
 ```bash
 cp config.example.yaml config.yaml
@@ -112,358 +41,156 @@ cp .env.example .env.dev
 cp .env.example .env.prod
 ```
 
-`config.yaml` 负责的主配置：
+关键配置项：
 
 - `app.host` / `app.port` / `app.logLevel`
-- `database.host` / `database.port` / `database.name` / `database.user`
-- `auth.accessTokenExpireMinutes`
-- `supervisor.confDir` / `supervisor.commandTimeoutSeconds`（默认 300，环境变量 `COMMAND_TIMEOUT_SECONDS` 可覆盖）
-- `executor.type` / `executor.inventoryPath` / `executor.remoteUser` / `executor.timeoutSeconds`（默认 300，环境变量 `ANSIBLE_COMMAND_TIMEOUT_SECONDS` 可覆盖；概况、导入、同步等远端 ansible 读取统一复用该超时）
+- `app.logPath`
+  - 不配置时仅输出到 stdout
+  - 配置后同时输出到 stdout 和滚动日志文件
+- `database.*`
+- `supervisor.confDir`
+- `executor.inventoryPath` / `executor.remoteUser` / `executor.timeoutSeconds`
 - `hosts`
 
-`.env.dev` / `.env.prod` 负责的敏感覆盖项：
+环境变量优先级：
 
-- `DATABASE_PASSWORD`
-- `JWT_SECRET`
-- `APP_CONFIG_PATH`
-
-环境变量加载优先级：
-
-- 进程显式环境变量
-- `.env.dev` / `.env.prod`
-- `config.yaml`
-- 代码默认值
+1. 进程显式环境变量
+2. `.env.dev` / `.env.prod`
+3. `config.yaml`
+4. 代码默认值
 
 环境文件选择规则：
 
-- `APP_ENV_FILE` 优先级最高，必须传绝对路径
-- 未设置 `APP_ENV_FILE` 时，`APP_ENV=dev` 加载 `.env.dev`
-- 未设置 `APP_ENV_FILE` 时，`APP_ENV=prod` 加载 `.env.prod`
-- 未设置 `APP_ENV` 时，保持旧行为，只读取进程环境变量和 `config.yaml`
-- `APP_ENV` 不依赖写在 `.env.dev/.env.prod` 内，应该由 `./scripts/run.sh dev|prod` 或外部环境显式传入
+- `APP_ENV_FILE=/absolute/path/to/custom.env`
+- 或 `APP_ENV=dev|prod`
 
-路径规则：
+## 数据库迁移
 
-- `SUPERVISOR_CONF_DIR` 等绝对路径配置只做词法归一化，不做宿主机物理 `resolve()`
-- 例如 `/etc/supervisord.d` 会保持 `/etc/supervisord.d`，不会在 macOS 控制机上被改写成 `/private/etc/supervisord.d`
+应用启动只初始化 Tortoise 连接，不再自动执行 SQL migration。
 
-主机列表示例见 [config.example.yaml](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/config.example.yaml:1)。
-
-数据库启动与迁移规则：
-
-- 应用启动只负责初始化/关闭 Tortoise 连接，不再自动建库、建表或执行 SQL migration
-- 数据库本身必须由外部环境预先创建
-- schema 变更统一通过 Aerich 显式执行
-- 仓库根目录 `migrations/models/` 是唯一迁移来源
-- 首次初始化数据库后，启动应用前先执行：`APP_ENV=dev .venv/bin/aerich upgrade`
-- 后续模型变更流程为：`APP_ENV=dev .venv/bin/aerich migrate --name <message> && APP_ENV=dev .venv/bin/aerich upgrade`
-- `app/database/migrations/001_init_schema.sql` 保留为历史基线参考，不再由运行时自动执行
-- 默认超级管理员初始化由 Aerich baseline 一并落库，不再依赖应用启动补种
-- 其他账号不提供 HTTP 创建接口，需要运维手工插入 `sys_user`
-- 若数据库仍残留旧版 `program_name/config_name` 列或旧唯一键，应用启动会直接失败并提示先执行 Aerich 升级，不再静默兼容旧写法
-
-密码哈希可以使用脚本生成：
-
-```bash
-python3 scripts/hash_password.py
-```
-
-## 导入现网配置
-
-现网已有 Supervisor 配置时，前端应优先调用初始化导入 API，再使用“库为主”的服务列表和详情接口。
-
-初始化导入 API：
-
-```bash
-curl -X GET 'http://127.0.0.1:18880/admin/api/supervisor/imports/staging?host=10.1.0.104' \
-  -H 'Authorization: Bearer <access-token>'
-
-curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "host": "10.1.0.104",
-    "mode": "PRECHECK"
-  }'
-
-curl -X POST http://127.0.0.1:18880/admin/api/supervisor/imports \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "host": "10.1.0.104",
-    "mode": "COMMIT",
-    "batchId": "<上一次 PRECHECK 返回的 batchId>"
-  }'
-```
-
-接口规则：
-
-- `GET /admin/api/supervisor/imports/staging?host=...`：按当前登录用户 + 主机恢复最近一批预检暂存数据
-- `GET staging` 无数据时返回 `exists=false`、空 `summary/items`
-- `GET staging` 有数据时返回 `exists=true + batchId + createdAt + summary + items`
-- 前端进入弹窗、切换主机、页面刷新时都应先调 `GET staging`
-- `mode=PRECHECK`：写入暂存表并返回 `batchId + summary + items`，不写 `sys_supervisor_service`
-- `PRECHECK` 永远重新扫描远端，并覆盖该用户该主机上一批暂存
-- `mode=COMMIT`：必须携带上一次 `PRECHECK` 返回的 `batchId`，整批原子写入正式表
-- `PRECHECK` 禁止携带 `batchId`，`COMMIT` 缺少 `batchId` 会直接返回 `400`
-- `PRECHECK` 结果中只要存在任意 `SKIPPED`，后端 `COMMIT` 就会返回 `409`
-- `COMMIT` 成功后删除该批次暂存；失败时正式表回滚，暂存保留供前端继续展示和重试
-- 固定递归扫描 `/etc/supervisord.d` 下全部 `*.ini`
-- 固定排除 `.ini.bak` 和 `.ini.bak.*`
-- 响应 `summary` 固定包含 `planned/imported/updated/skipped`
-- 响应 `items` 固定按 `configPath` 升序返回，便于前端稳定展示
-- `host` 必须是白名单中的 IP 地址，不再支持逻辑别名
-- 远端主机未匹配、主机不可达或目录下无任何 `*.ini` 时，返回 `404` 失败，不会返回空成功
-- 导入接口是同步长请求，后端命令超时默认按 300s 配置（`supervisor.commandTimeoutSeconds` / `executor.timeoutSeconds`）
-
-服务列表、同步与变更规则：
-
-- `GET /admin/api/supervisor/services` 新增 `archived=false|true|all` 查询参数，默认 `false`
-- `GET /admin/api/supervisor/services/{contentProgramName}` 只返回数据库快照，不隐式读取远端 `.ini/.bak` 或执行 `supervisorctl status`
-- `POST /admin/api/supervisor/services/{contentProgramName}/sync` 才会显式读取远端状态、当前配置和可选备份，并把结果回写数据库
-- `POST /admin/api/supervisor/services` 同时支持 `local + ansible` 主机新增模板服务
-- `PUT /admin/api/supervisor/services/{contentProgramName}` 支持修改未归档记录；如果原记录是 `IMPORTED_READONLY`，修改后会转成 `TEMPLATE_MANAGED`
-- `DELETE /admin/api/supervisor/services/{contentProgramName}` 仅允许删除已归档记录；固定先删数据库，再清理远端 `.ini/.bak` 残留
-- 归档后的服务仍可查看详情，但 `start/stop/restart` 会被后端直接拒绝
-- 归档后的服务不能直接 `PUT`，但允许直接执行硬删除
-- `POST /admin/api/supervisor/services/{contentProgramName}/archive` 会先 `stop`，再备份、删除 `.ini` 并执行 `reread/update`
-- `POST /admin/api/supervisor/services/{contentProgramName}/restore` 只恢复配置并执行 `reread/update`，不会自动启动
-
-命令行脚本保留为运维兜底入口：
-
-```bash
-.venv/bin/python scripts/import_supervisor_services.py --host 10.1.0.104 --recursive
-```
-
-导入规则：
-
-- 默认是 `dry-run`，只有追加 `--apply` 才会写数据库
-- 支持 `--host` 指定单台主机
-- 支持 `--recursive` 递归扫描 `/etc/supervisord.d` 子目录
-- 只导入 `*.ini`
-- 不导入 `.bak` 和归档备份
-- `fileName` 和 `contentProgramName` 会原样冗余保存，即使两者不一致也不会互相覆盖
-- legacy 配置允许重复 key，按最后一个值生效，并在 `parseWarnings` 中记录
-- 结构化字段能提取就填，提取不到就留空；只要能识别为单个合法 `[program:*]` 段就允许入库
-- 导入脚本允许读取远端主机现有配置，但不会修改远端文件
-
-## 业务文档
-
-- 基线业务说明见 [docs/01.业务流程说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/01.业务流程说明.md)
-- 本次主数据化改造见 [docs/02.Supervisor管理表设计与同步流程.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/02.Supervisor管理表设计与同步流程.md)
-- 本次跨域预检修复见 [docs/03.跨域预检与跨源访问说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/03.跨域预检与跨源访问说明.md)
-- 本次远端只读约束与路径修正见 [docs/04.远端只读约束与路径语义修正.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/04.远端只读约束与路径语义修正.md)
-- 本次只读初始化导入与冗余字段设计见 [docs/05.只读初始化导入与冗余字段设计.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/05.只读初始化导入与冗余字段设计.md)
-- 本次数据库基线 DDL 整合见 [docs/06.数据库基线DDL整合说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/06.数据库基线DDL整合说明.md)
-- 本次 Supervisor 导入初始化 API 约定见 [docs/07.Supervisor导入初始化API约定.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/07.Supervisor导入初始化API约定.md)
-- 本次 Ansible 输出兼容与告警治理见 [docs/08.Ansible输出兼容与告警治理.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/08.Ansible输出兼容与告警治理.md)
-- 本次 Supervisor 服务列表分页与数据库查询改造见 [docs/09.Supervisor服务列表分页与数据库查询改造.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/09.Supervisor服务列表分页与数据库查询改造.md)
-- 本次 Supervisor 归档与运行操作联动见 [docs/10.Supervisor归档与运行操作联动说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/10.Supervisor归档与运行操作联动说明.md)
-- 本次 Supervisor 详情数据库化与单服务同步见 [docs/11.Supervisor详情数据库化与单服务同步说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/11.Supervisor详情数据库化与单服务同步说明.md)
-- 本次 Supervisor 本地远端统一增改删见 [docs/12.Supervisor本地远端统一增改删说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/12.Supervisor本地远端统一增改删说明.md)
-- 本次 Supervisor 服务器概况真实 API 见 [docs/13.Supervisor服务器概况真实API说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/13.Supervisor服务器概况真实API说明.md)
-- 本次 Supervisor 初始化导入暂存恢复见 [docs/14.Supervisor初始化导入暂存恢复说明.md](/Users/zhuningkang/Documents/git/github/supervisor-model/be-supervisor-model/docs/14.Supervisor初始化导入暂存恢复说明.md)
-
-## Docker / docker-compose 部署
-
-前提：
-
-- MySQL 继续使用外部已有实例，容器内不内置数据库
-- 宿主机必须存在 `/etc/ansible`，并且 inventory 能按目标主机 IP 直接匹配
-- 容器内的概况、导入、同步、运行、归档能力都会复用这套 `/etc/ansible` 配置
-
-构建镜像：
-
-```bash
-docker build -t be-supervisor-model:latest .
-```
-
-使用 docker-compose 启动：
-
-```bash
-docker compose up -d --build
-```
-
-部署约定：
-
-- `docker-compose.yml` 只部署应用容器，不包含 MySQL
-- 启动命令固定先执行 `python3.12 -m aerich upgrade`，再启动 FastAPI
-- `config.yaml` 通过只读挂载注入容器，并通过 `APP_CONFIG_PATH=/app/config.yaml` 显式指定
-- `/etc/ansible` 通过只读挂载注入容器
-- `.env.prod` 通过 `env_file` 加载
-- 如需预检编排结果，可先执行 `docker compose config`
-
-## 启动方式
-
-项目默认在 `.venv` 环境中运行；开发、测试和手工启动都以 `.venv` 作为标准 Python 运行时。
-
-Aerich 常用命令：
+首次初始化或模型变更后，统一执行：
 
 ```bash
 APP_ENV=dev .venv/bin/aerich upgrade
-APP_ENV=dev .venv/bin/aerich migrate --name <message>
-APP_ENV=dev .venv/bin/aerich downgrade
 ```
+
+新增 migration：
+
+```bash
+APP_ENV=dev .venv/bin/aerich migrate --name <message>
+APP_ENV=dev .venv/bin/aerich upgrade
+```
+
+说明：
+
+- `migrations/models/` 是唯一迁移来源
+- `app/database/migrations/001_init_schema.sql` 只保留为历史结构快照
+- 若数据库仍残留旧版 `program_name/config_name` 列或旧唯一键，启动会 fail-fast 并提示先执行 Aerich 升级
+
+## 本地运行
+
+创建虚拟环境并安装依赖：
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-APP_ENV=dev .venv/bin/aerich upgrade
+```
+
+启动：
+
+```bash
 ./scripts/run.sh dev
 ```
 
-生产环境启动：
+常用验证：
 
 ```bash
-APP_ENV=prod .venv/bin/aerich upgrade
-./scripts/run.sh prod
+python3 -m compileall app tests scripts
+.venv/bin/python -m pytest -q
 ```
 
-脚本规则：
+## Docker 部署
 
-- 必须显式传入 `dev` 或 `prod`
-- `./scripts/run.sh` 不传参数会直接报错
-- 脚本会按自身位置定位仓库根目录，可在仓库根目录或 `scripts/` 目录执行
-- 如需使用自定义环境文件，可手工执行 `APP_ENV_FILE=/absolute/path/to/custom.env python3.12 -m uvicorn app.main:app`
+仓库内置 `Dockerfile` 与 `docker-compose.yml`，默认只部署应用容器，继续连接外部 MySQL。
 
-## API 列表
+启动前要求：
+
+- 宿主机已准备 `/etc/ansible`
+- inventory 能按 `hosts[].ip` 直接匹配目标主机
+- 宿主机可免交互访问目标主机
+- 外部 MySQL 已建库并可连通
+
+启动：
+
+```bash
+docker compose up -d --build
+```
+
+容器部署规则：
+
+- 容器启动命令固定先执行 `aerich upgrade`
+- 成功后再执行 `./scripts/run.sh prod`
+- `APP_LOG_PATH=/var/log/be-supervisor-model/app.log`
+- 宿主机日志目录通过 `HOST_LOG_DIR` 挂载，默认 `/var/log/be-supervisor-model`
+- 应用日志固定为 `stdout + 文件双写`
+
+## Ansible 前置条件
+
+- `executorType=ansible` 的主机统一按 `host.ip` 作为 inventory pattern
+- 控制机 `inventoryPath` 必须存在且可读
+- 概况、导入、同步、增改删、运行操作都会复用同一套 ansible 配置
+- 概况接口不允许前端回退到 mock 数据
+
+## 关键 API 流程
+
+认证：
 
 - `POST /admin/api/auth/login`
 - `GET /admin/api/auth/profile`
 - `POST /admin/api/auth/logout`
+
+Supervisor：
+
 - `GET /admin/api/supervisor/hosts`
-- `GET /admin/api/supervisor/overview?host=10.1.0.104`（实时只读采集主机 CPU/内存/基础检查，不落库；响应头固定 `Cache-Control: no-store`；local 主机在 v1 返回 `UNSUPPORTED`）
+- `GET /admin/api/supervisor/overview`
+- `GET /admin/api/supervisor/services`
+- `GET /admin/api/supervisor/services/{contentProgramName}`
+- `POST /admin/api/supervisor/services/{contentProgramName}/sync`
+- `POST /admin/api/supervisor/services/status/refresh`
+
+初始化导入：
+
+- `GET /admin/api/supervisor/imports/staging?host=...`
 - `POST /admin/api/supervisor/imports`
-- `GET /admin/api/supervisor/services?host=&keyword=&status=&archived=&page=&pageSize=`（分页查询，纯数据库，不触发远端命令；默认 `archived=false`）
-- `GET /admin/api/supervisor/services/{contentProgramName}?host=127.0.0.1`（详情，纯数据库快照）
-- `POST /admin/api/supervisor/services/{contentProgramName}/sync?host=127.0.0.1`（显式同步远端状态与配置快照）
-- `POST /admin/api/supervisor/services`（本地和远端都支持新增）
-- `PUT /admin/api/supervisor/services/{contentProgramName}?host=10.1.0.104`（修改未归档服务）
-- `DELETE /admin/api/supervisor/services/{contentProgramName}?host=10.1.0.104`（仅已归档记录可硬删除；先删库，再清理 `.ini/.bak`）
-- `POST /admin/api/supervisor/services/{contentProgramName}/start?host=10.1.0.104`
-- `POST /admin/api/supervisor/services/{contentProgramName}/stop?host=10.1.0.104`
-- `POST /admin/api/supervisor/services/{contentProgramName}/restart?host=10.1.0.104`
-- `POST /admin/api/supervisor/services/{contentProgramName}/archive?host=10.1.0.104`
-- `POST /admin/api/supervisor/services/{contentProgramName}/restore?host=10.1.0.104`
-- `POST /admin/api/supervisor/services/status/refresh?host=127.0.0.1`（批量刷新状态快照）
+  - `mode=PRECHECK`
+  - `mode=COMMIT`
 
-主机实时概况接口说明：
+服务变更：
 
-- `GET /admin/api/supervisor/overview?host=...` 走后端实时采集，不写 MySQL，不启后台线程
-- 远端 `ansible` Linux 主机会执行一次固定只读脚本，采集 `hostname`、CPU、内存、`supervisorctl` 可用性和 `/etc/supervisord.d` 可读性
-- 概况接口不再单独使用 8s 短超时，统一复用 `executor.timeoutSeconds`
-- `local` 主机在 v1 固定返回 `available=false`、`connectionState=UNSUPPORTED`
-- 目标主机暂时不可达时返回 `200`，但 `available=false`、`connectionState=UNREACHABLE`
-- 响应头固定 `Cache-Control: no-store`，前端短缓存仅用于体验优化，不是权威数据源
-- Supervisor 页面所有展示数据都必须走后端接口，不允许前端回填 mock CPU/内存/检查项
-- 前端判断“不可达”必须依赖 `connectionState + warnings + checks`，不能把 `0.00% / 0 B` 当成真实主机负载
+- `POST /admin/api/supervisor/services`
+- `PUT /admin/api/supervisor/services/{contentProgramName}`
+- `DELETE /admin/api/supervisor/services/{contentProgramName}`
+- `POST /admin/api/supervisor/services/{contentProgramName}/archive`
+- `POST /admin/api/supervisor/services/{contentProgramName}/restore`
+- `POST /admin/api/supervisor/services/{contentProgramName}/start`
+- `POST /admin/api/supervisor/services/{contentProgramName}/stop`
+- `POST /admin/api/supervisor/services/{contentProgramName}/restart`
 
-## 跨域访问说明
+## 文档索引
 
-- 所有 `/admin/api/*` 接口统一由服务端补齐 CORS 响应头
-- 浏览器发送的 `OPTIONS` 预检请求会直接返回 `200`，不做 JWT 鉴权
-- 当前策略对齐 `be-vita`：有 `Origin` 时原样回写，没有 `Origin` 时返回 `*`
-- 跨域放行只解决浏览器可达性，不影响原有 `Authorization: Bearer <jwt>` 鉴权规则
-
-统一响应格式：
-
-```json
-{
-  "code": 200,
-  "msg": "success",
-  "data": {}
-}
-```
-
-## 示例
-
-登录获取 Token：
-
-```bash
-curl -X POST http://127.0.0.1:18880/admin/api/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "username": "admin",
-    "password": "Admin@123456"
-  }'
-```
-
-新增服务：
-
-```bash
-curl -X POST http://127.0.0.1:18880/admin/api/supervisor/services \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "host": "127.0.0.1",
-    "jobName": "demo-project",
-    "moduleName": "member",
-    "contentProgramName": "member-demo-project",
-    "javaPath": "/usr/local/jdk17/bin/java",
-    "active": "prod",
-    "port": 9001,
-    "jarName": "member.jar",
-    "fileName": "",
-    "xms": "128m",
-    "xmx": "128m",
-    "user": "root"
-  }'
-```
-
-修改服务：
-
-```bash
-curl -X PUT 'http://127.0.0.1:18880/admin/api/supervisor/services/member-demo-project?host=10.1.0.104' \
-  -H 'Authorization: Bearer <access-token>' \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jobName": "demo-project",
-    "moduleName": "member-v2",
-    "contentProgramName": "member-v2-demo-project",
-    "javaPath": "/usr/local/jdk17/bin/java",
-    "active": "prod",
-    "port": 9002,
-    "jarName": "member-v2.jar",
-    "fileName": "",
-    "xms": "256m",
-    "xmx": "256m",
-    "user": "root"
-  }'
-```
-
-删除服务：
-
-```bash
-curl -X DELETE 'http://127.0.0.1:18880/admin/api/supervisor/services/member-demo-project?host=10.1.0.104' \
-  -H 'Authorization: Bearer <access-token>'
-```
-
-变更规则：
-
-- `POST / PUT / DELETE` 都支持 `local + ansible`
-- `DELETE` 仅允许删除已归档记录；固定先删库，再清理远端 `.ini/.bak` 残留
-- 已归档记录不能直接修改，但允许硬删除
-- 未归档记录不能直接删除，必须先归档
-- `IMPORTED_READONLY` 记录一旦被修改，会转成 `TEMPLATE_MANAGED`
-
-查询服务列表：
-
-```bash
-curl 'http://127.0.0.1:18880/admin/api/supervisor/services?host=127.0.0.1' \
-  -H 'Authorization: Bearer <access-token>'
-```
-
-查询服务详情：
-
-```bash
-curl 'http://127.0.0.1:18880/admin/api/supervisor/services/member-demo-project?host=127.0.0.1' \
-  -H 'Authorization: Bearer <access-token>'
-```
-
-同步单服务详情快照：
-
-```bash
-curl -X POST 'http://127.0.0.1:18880/admin/api/supervisor/services/member-demo-project/sync?host=127.0.0.1' \
-  -H 'Authorization: Bearer <access-token>'
-```
+- `docs/01.业务流程说明.md`
+- `docs/02.Supervisor管理表设计与同步流程.md`
+- `docs/03.跨域预检与跨源访问说明.md`
+- `docs/04.远端执行与路径安全约束说明.md`
+- `docs/05.只读初始化导入与冗余字段设计.md`
+- `docs/06.数据库基线DDL整合说明.md`
+- `docs/07.Supervisor导入初始化API约定.md`
+- `docs/08.Ansible输出兼容与告警治理.md`
+- `docs/09.Supervisor服务列表分页与数据库查询改造.md`
+- `docs/10.Supervisor归档与运行操作联动说明.md`
+- `docs/11.Supervisor详情数据库化与单服务同步说明.md`
+- `docs/12.Supervisor本地远端统一增改删说明.md`
+- `docs/13.Supervisor服务器概况真实API说明.md`
+- `docs/14.Supervisor初始化导入暂存恢复说明.md`
+- `docs/15.Docker部署与日志输出说明.md`

@@ -2,6 +2,8 @@ app:
   host: 0.0.0.0
   port: 18881
   logLevel: info
+  # 容器部署时可改由 APP_LOG_PATH 覆盖到宿主机挂载目录
+  logPath:
 
 database:
   host: 106.54.205.33
