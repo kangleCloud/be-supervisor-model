@@ -14,7 +14,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - /etc/ansible:/etc/ansible:ro
     ports:
-      - "18880:18880"
+      - "18881:18881"
     command: >-
       bash -lc "python3.12 -m aerich upgrade &&
       python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 18880"

@@ -19,6 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 18880
+EXPOSE 18881
 
 CMD ["bash", "-lc", "python3.12 -m aerich upgrade && python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 18880"]
