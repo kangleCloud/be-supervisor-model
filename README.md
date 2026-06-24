@@ -132,7 +132,7 @@ docker compose up -d --build
 - 容器启动命令固定先执行 `aerich upgrade`
 - 成功后再执行 `./scripts/run.sh prod`
 - `APP_LOG_PATH=/var/log/be-supervisor-model/app.log`
-- 宿主机日志目录通过 `HOST_LOG_DIR` 挂载，默认 `/var/log/be-supervisor-model`
+- 宿主机日志目录固定为 `/data/logs/be-supervisor-model/`
 - 应用日志固定为 `stdout + 文件双写`
 
 ## Ansible 前置条件
