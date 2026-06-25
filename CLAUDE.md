@@ -10,29 +10,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Setup
-python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+python3.12 -m pip install -r requirements.txt
 
 # Run (choose dev or prod)
 ./scripts/run.sh dev
 ./scripts/run.sh prod
 
 # Run directly
-uvicorn app.main:app --host 0.0.0.0 --port 18880
+python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 18880
 
 # Run all tests
-pytest -q
+PYTHONPATH=$PWD python3.12 -m pytest -q
 
 # Run a single test file
-pytest -q tests/test_api.py
+PYTHONPATH=$PWD python3.12 -m pytest -q tests/test_api.py
 
 # Run a single test
-pytest -q tests/test_api.py::test_api_create_and_read_flow
+PYTHONPATH=$PWD python3.12 -m pytest -q tests/test_api.py::test_api_create_and_read_flow
 
 # Compile-check (py_compile all modules)
-python -m compileall app
+python3.12 -m compileall app
 
 # Hash a password for manual user creation
-python3 scripts/hash_password.py
+python3.12 scripts/hash_password.py
 ```
 
 ## Architecture
@@ -47,7 +47,7 @@ app/services/          — Business logic layer, all orchestration lives here
 app/executor/          — Remote execution abstraction: LocalExecutor (direct subprocess) and AnsibleExecutor (ansible ad-hoc)
 app/core/              — Infrastructure: config loading, database connection & migrations, JWT, passwords, logging, security, exceptions, response format
 app/templates/         — Jinja2 template for Supervisor INI generation
-app/database/migrations/  — Single-baseline SQL migration (001_init_schema.sql)
+app/database/migrations/  — 手工执行的数据库 SQL（001 新库基线，002 旧库升级）
 tests/                 — pytest tests with comprehensive mocking infrastructure
 docs/                  — Business documentation with numbered topic documents (01., 02., ...)
 scripts/               — Helper scripts (run.sh, import_supervisor_services.py, hash_password.py)
@@ -62,7 +62,7 @@ scripts/               — Helper scripts (run.sh, import_supervisor_services.py
    - `ansible` — remote operations via `ansible -m shell` ad-hoc commands
    Both implement the abstract `RemoteExecutor` interface (`app/executor/base.py`).
 
-3. **Database**: MySQL 8 via pymysql. Connection is acquired per-operation via `get_connection()` context manager. The `sys_supervisor_service` table is the single source of truth for managed Supervisor services.
+3. **Database**: MySQL 8 via Tortoise ORM models + direct repository access. `sys_supervisor_service` is the single source of truth for managed Supervisor services; schema 通过仓库内 SQL 手工维护。
 
 4. **Two management modes** for Supervisor services:
    - `TEMPLATE_MANAGED` — created via the API's POST /services endpoint; uses Jinja2 template rendering

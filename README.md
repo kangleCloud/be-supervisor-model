@@ -20,7 +20,7 @@
 - 目标主机必须来自 `hosts` 白名单
 - 远端执行统一通过 `local` 或 `ansible` 两类执行器
 
-数据库真实列统一以这三组字段为主：
+数据库真实定位字段固定为：
 
 - `config_path`：相对 `/etc/supervisord.d` 的真实定位路径
 - `file_name`：配置文件 basename
@@ -64,37 +64,28 @@ cp .env.example .env.prod
 - `APP_ENV_FILE=/absolute/path/to/custom.env`
 - 或 `APP_ENV=dev|prod`
 
-## 数据库迁移
+## 数据库 SQL 管理
 
-应用启动只初始化 Tortoise 连接，不再自动执行 SQL migration。
+应用启动只初始化 Tortoise 连接，不再自动执行任何迁移。
 
-首次初始化或模型变更后，统一执行：
+手工 SQL 规则：
 
-```bash
-APP_ENV=dev .venv/bin/aerich upgrade
-```
+- 新库初始化：先执行 `app/database/migrations/001_init_schema.sql`
+- 旧库升级：若仍残留旧版 `program_name/config_name` 或旧唯一键，再执行 `app/database/migrations/002_fix_supervisor_service_legacy_schema.sql`
+- 执行完成后再启动应用
 
-新增 migration：
+运行期约束：
 
-```bash
-APP_ENV=dev .venv/bin/aerich migrate --name <message>
-APP_ENV=dev .venv/bin/aerich upgrade
-```
-
-说明：
-
-- `migrations/models/` 是唯一迁移来源
-- `app/database/migrations/001_init_schema.sql` 只保留为历史结构快照
-- 若数据库仍残留旧版 `program_name/config_name` 列或旧唯一键，启动会 fail-fast 并提示先执行 Aerich 升级
+- MySQL 启动时会做 schema fail-fast
+- 缺少核心表时，错误会直接指向 `001_init_schema.sql`
+- 残留旧字段或旧索引时，错误会直接指向 `002_fix_supervisor_service_legacy_schema.sql`
 
 ## 本地运行
 
-创建虚拟环境并安装依赖：
+在当前可用的 Python 3.12 环境中安装依赖：
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+python3.12 -m pip install -r requirements.txt
 ```
 
 启动：
@@ -106,8 +97,8 @@ pip install -r requirements.txt
 常用验证：
 
 ```bash
-python3 -m compileall app tests scripts
-.venv/bin/python -m pytest -q
+python3.12 -m compileall app tests scripts
+PYTHONPATH=$PWD python3.12 -m pytest -q
 ```
 
 ## Docker 部署
@@ -120,6 +111,7 @@ python3 -m compileall app tests scripts
 - inventory 能按 `hosts[].ip` 直接匹配目标主机
 - 宿主机可免交互访问目标主机
 - 外部 MySQL 已建库并可连通
+- 新库或旧库已按需手工执行 SQL 文件
 
 启动：
 
@@ -129,8 +121,7 @@ docker compose up -d --build
 
 容器部署规则：
 
-- 容器启动命令固定先执行 `aerich upgrade`
-- 成功后再执行 `./scripts/run.sh prod`
+- 容器启动命令只执行 `./scripts/run.sh prod`
 - `APP_LOG_PATH=/var/log/be-supervisor-model/app.log`
 - 宿主机日志目录固定为 `/data/logs/be-supervisor-model/`
 - 应用日志固定为 `stdout + 文件双写`

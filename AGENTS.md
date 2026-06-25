@@ -52,13 +52,12 @@
 ## 构建、测试与开发命令
 
 本地开发使用 Python 3.12。
-项目默认通过 `.venv` 作为标准 Python 运行环境。
+项目不再约定固定虚拟环境；在当前可用的 Python 3.12 环境中安装依赖即可。
 
-- `python3.12 -m venv .venv && source .venv/bin/activate`
-- `pip install -r requirements.txt`
-- `python -m compileall app`
-- `pytest -q`
-- `uvicorn app.main:app --host 0.0.0.0 --port 18880`
+- `python3.12 -m pip install -r requirements.txt`
+- `python3.12 -m compileall app`
+- `PYTHONPATH=$PWD python3.12 -m pytest -q`
+- `python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 18880`
 
 ## 编码风格与命名规范
 

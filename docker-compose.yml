@@ -22,6 +22,3 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-    command: >-
-      bash -lc "python3.12 -m aerich upgrade &&
-      bash ./scripts/run.sh \"$APP_ENV\""

@@ -1,4 +1,4 @@
-"""数据库启动、模型覆盖与 Aerich 基线测试。"""
+"""数据库启动、模型覆盖与手工 SQL 基线测试。"""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,6 @@ from pathlib import Path
 
 from app.database.bootstrap import (
     MySQLIndexMetadata,
-    _load_db_config_for_aerich,
     _validate_mysql_supervisor_schema,
     build_sqlite_test_config,
     close_database,
@@ -18,7 +17,9 @@ from app.database.models.supervisor import SupervisorImportStagingModel, Supervi
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MIGRATIONS_DIR = PROJECT_ROOT / "migrations" / "models"
+DATABASE_MIGRATIONS_DIR = PROJECT_ROOT / "app" / "database" / "migrations"
+BASELINE_SQL_PATH = DATABASE_MIGRATIONS_DIR / "001_init_schema.sql"
+LEGACY_FIX_SQL_PATH = DATABASE_MIGRATIONS_DIR / "002_fix_supervisor_service_legacy_schema.sql"
 
 
 def test_database_init_and_close_with_sqlite(settings, test_environment, run_db):
@@ -94,21 +95,19 @@ def test_models_cover_final_schema_fields():
     } <= staging_model_fields
 
 
-def test_aerich_baseline_files_exist_and_are_real():
-    assert MIGRATIONS_DIR.is_dir()
-    assert (MIGRATIONS_DIR / "__init__.py").exists()
+def test_manual_baseline_sql_exists_and_covers_final_schema():
+    migration_sql = BASELINE_SQL_PATH.read_text(encoding="utf-8")
 
-    migration_files = sorted(MIGRATIONS_DIR.glob("0_*_init.py"))
-    assert migration_files, "缺少 Aerich baseline migration 文件"
-
-    migration_text = migration_files[0].read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS `sys_user`" in migration_text
-    assert "CREATE TABLE IF NOT EXISTS `sys_login_log`" in migration_text
-    assert "CREATE TABLE IF NOT EXISTS `sys_login_token`" in migration_text
-    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_text
-    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_import_staging`" in migration_text
-    assert "INSERT INTO `sys_user`" in migration_text
-    assert "'admin'" in migration_text
+    assert BASELINE_SQL_PATH.exists()
+    assert "新库初始化基线 SQL" in migration_sql
+    assert "CREATE TABLE IF NOT EXISTS `sys_user`" in migration_sql
+    assert "CREATE TABLE IF NOT EXISTS `sys_login_log`" in migration_sql
+    assert "CREATE TABLE IF NOT EXISTS `sys_login_token`" in migration_sql
+    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_service`" in migration_sql
+    assert "CREATE TABLE IF NOT EXISTS `sys_supervisor_import_staging`" in migration_sql
+    assert "UNIQUE KEY `uk_supervisor_host_config_path`" in migration_sql
+    assert "KEY `idx_supervisor_host_program`" in migration_sql
+    assert "INSERT INTO `sys_user`" in migration_sql
 
 
 def test_supervisor_schema_problem_detector_flags_legacy_columns_and_indexes():
@@ -144,7 +143,27 @@ def test_supervisor_schema_problem_detector_accepts_final_schema():
     assert problems == []
 
 
-def test_validate_mysql_supervisor_schema_raises_explicit_upgrade_error():
+def test_validate_mysql_supervisor_schema_raises_explicit_baseline_sql_error():
+    class _FakeMySQLConnection:
+        schema_generator = type("_SchemaGenerator", (), {"DIALECT": "mysql"})
+
+        async def execute_query_dict(self, query, values):  # noqa: ANN001
+            if "information_schema.TABLES" in query:
+                return []
+            raise AssertionError(f"unexpected query: {query}")
+
+    try:
+        asyncio.run(_validate_mysql_supervisor_schema(_FakeMySQLConnection()))
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected schema validation to fail")
+
+    assert "001_init_schema.sql" in message
+    assert "请先手工执行" in message
+
+
+def test_validate_mysql_supervisor_schema_raises_explicit_legacy_fix_sql_error():
     class _FakeMySQLConnection:
         schema_generator = type("_SchemaGenerator", (), {"DIALECT": "mysql"})
 
@@ -173,105 +192,19 @@ def test_validate_mysql_supervisor_schema_raises_explicit_upgrade_error():
     else:
         raise AssertionError("expected schema validation to fail")
 
-    assert "请先执行 Aerich 升级" in message
+    assert "002_fix_supervisor_service_legacy_schema.sql" in message
+    assert "请先手工执行" in message
     assert "program_name" in message
 
 
-def test_load_db_config_for_aerich_uses_app_env(monkeypatch, tmp_path):
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "database:",
-                "  host: 127.0.0.1",
-                "  port: 3306",
-                "  name: from_yaml",
-                "  user: yaml_user",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    env_file = tmp_path / ".env.dev"
-    env_file.write_text(
-        "\n".join(
-            [
-                "DATABASE_PASSWORD=test-password",
-                "DATABASE_HOST=10.9.8.7",
-            ]
-        ),
-        encoding="utf-8",
-    )
+def test_manual_legacy_fix_sql_exists_and_is_idempotent():
+    migration_sql = LEGACY_FIX_SQL_PATH.read_text(encoding="utf-8")
 
-    monkeypatch.setattr("app.database.bootstrap._repo_root", lambda: tmp_path)
-    monkeypatch.setenv("APP_ENV", "dev")
-    monkeypatch.delenv("APP_ENV_FILE", raising=False)
-    monkeypatch.delenv("APP_CONFIG_PATH", raising=False)
-    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
-    monkeypatch.delenv("DATABASE_HOST", raising=False)
-
-    host, port, database, user, password = _load_db_config_for_aerich()
-
-    assert host == "10.9.8.7"
-    assert port == 3306
-    assert database == "from_yaml"
-    assert user == "yaml_user"
-    assert password == "test-password"
-
-
-def test_load_db_config_for_aerich_uses_app_env_file(monkeypatch, tmp_path):
-    config_path = tmp_path / "custom.yaml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "database:",
-                "  host: 192.168.1.10",
-                "  port: 3307",
-                "  name: custom_db",
-                "  user: custom_user",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    env_file = tmp_path / "custom.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "DATABASE_PASSWORD=env-file-password",
-                f"APP_CONFIG_PATH={config_path}",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    monkeypatch.delenv("APP_ENV", raising=False)
-    monkeypatch.setenv("APP_ENV_FILE", str(env_file))
-    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
-
-    host, port, database, user, password = _load_db_config_for_aerich()
-
-    assert host == "192.168.1.10"
-    assert port == 3307
-    assert database == "custom_db"
-    assert user == "custom_user"
-    assert password == "env-file-password"
-
-
-def test_incremental_supervisor_schema_fix_migration_exists():
-    migration_path = MIGRATIONS_DIR / "1_20260612170000_fix_supervisor_service_legacy_schema.py"
-    migration_text = migration_path.read_text(encoding="utf-8")
-
-    assert migration_path.exists()
-    assert "DROP COLUMN `program_name`" in migration_text
-    assert "DROP COLUMN `config_name`" in migration_text
-    assert "information_schema.COLUMNS" in migration_text
-    assert "information_schema.STATISTICS" in migration_text
-    assert "uk_supervisor_host_config_path" in migration_text
-
-
-def test_legacy_sql_snapshot_is_reference_only():
-    migration_path = PROJECT_ROOT / "app" / "database" / "migrations" / "001_init_schema.sql"
-    migration_sql = migration_path.read_text(encoding="utf-8")
-
-    assert migration_path.exists()
-    assert "Historical SQL snapshot only." in migration_sql
-    assert "Runtime startup no longer executes this file" in migration_sql
+    assert LEGACY_FIX_SQL_PATH.exists()
+    assert "可重复执行" in migration_sql
+    assert "information_schema.COLUMNS" in migration_sql
+    assert "information_schema.STATISTICS" in migration_sql
+    assert "DROP COLUMN `program_name`" in migration_sql
+    assert "DROP COLUMN `config_name`" in migration_sql
+    assert "uk_supervisor_host_config_path" in migration_sql
+    assert "idx_supervisor_host_program" in migration_sql

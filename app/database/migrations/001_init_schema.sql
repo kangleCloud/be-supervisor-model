@@ -1,6 +1,6 @@
--- Historical SQL snapshot only.
--- This file is retained for reference and manual comparison.
--- Runtime startup no longer executes this file; schema changes are managed by Aerich migrations under migrations/models/.
+-- 新库初始化基线 SQL。
+-- 在首次部署到空 MySQL 数据库前，请先手工执行本文件，再启动应用。
+-- 如果数据库已经存在旧版 sys_supervisor_service 结构，请改执行 002_fix_supervisor_service_legacy_schema.sql。
 
 CREATE TABLE IF NOT EXISTS `sys_user` (
     `id` BIGINT NOT NULL PRIMARY KEY COMMENT 'ID',

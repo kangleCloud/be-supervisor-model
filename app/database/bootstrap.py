@@ -1,38 +1,28 @@
 """Tortoise ORM 启动与事务封装。"""
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Mapping
 from urllib.parse import quote_plus
 
-import yaml
 from tortoise import Tortoise
 from tortoise.connection import connections
 from tortoise.transactions import in_transaction as tortoise_in_transaction
 
-from app.core.config import (
-    DEFAULT_DATABASE_HOST,
-    DEFAULT_DATABASE_NAME,
-    DEFAULT_DATABASE_PORT,
-    DEFAULT_DATABASE_USER,
-    Settings,
-)
-from app.core.env_loader import build_runtime_environ
+from app.core.config import Settings
 
 
 MODELS_APP = {
     "models": [
         "app.database.models",
-        "aerich.models",
     ],
     "default_connection": "default",
 }
 
 MYSQL_DIALECT = "mysql"
 SUPERVISOR_SERVICE_TABLE = "sys_supervisor_service"
+BASELINE_SCHEMA_SQL_PATH = "app/database/migrations/001_init_schema.sql"
+LEGACY_FIX_SCHEMA_SQL_PATH = "app/database/migrations/002_fix_supervisor_service_legacy_schema.sql"
 LEGACY_SUPERVISOR_COLUMNS = frozenset({"program_name", "config_name"})
 REQUIRED_SUPERVISOR_COLUMNS = frozenset({"config_path", "file_name", "content_program_name"})
 
@@ -44,46 +34,6 @@ class MySQLIndexMetadata:
     name: str
     columns: tuple[str, ...]
     unique: bool
-
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
-
-
-def _load_yaml_config(config_path: Path) -> dict[str, object]:
-    """复用应用配置语义，读取 YAML 主配置。"""
-    if not config_path.exists():
-        return {}
-
-    payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(payload, dict):
-        raise ValueError("config.yaml 顶层结构必须是对象")
-    return payload
-
-
-def _get_nested(config_data: Mapping[str, object], *keys: str, default: Any = None) -> Any:
-    current: Any = config_data
-    for key in keys:
-        if not isinstance(current, Mapping) or key not in current:
-            return default
-        current = current[key]
-    return current
-
-
-def _resolve_external_runtime_sources(
-    environ: Mapping[str, str] | None = None,
-    *,
-    repo_root: Path | None = None,
-) -> tuple[dict[str, str], dict[str, object], Path]:
-    """为 Aerich 和外部脚本复用与应用一致的 .env + config.yaml 解析规则。"""
-    # 优先级固定为：显式环境变量 > .env.dev/.env.prod > config.yaml > 代码默认值。
-    actual_repo_root = repo_root or _repo_root()
-    raw_environ = dict(environ or os.environ)
-    runtime_environ = build_runtime_environ(raw_environ, actual_repo_root)
-    config_path = Path((runtime_environ.get("APP_CONFIG_PATH") or "").strip() or actual_repo_root / "config.yaml").expanduser()
-    if not config_path.is_absolute():
-        config_path = (actual_repo_root / config_path).resolve()
-    return runtime_environ, _load_yaml_config(config_path), config_path
 
 
 def find_supervisor_service_schema_problems(
@@ -160,7 +110,7 @@ async def _load_mysql_supervisor_indexes(connection) -> list[MySQLIndexMetadata]
 
 async def _validate_mysql_supervisor_schema(connection) -> None:
     """MySQL 启动前校验主表结构，发现旧库直接阻止继续运行。"""
-    # 这里故意 fail-fast：代码已经按新 schema 运行时，继续容忍旧列/旧索引只会把问题拖到更隐蔽的业务路径里。
+    # 这里故意 fail-fast：手工 SQL 没有执行完整时，继续启动只会把问题拖到更隐蔽的业务路径里。
     table_rows = await connection.execute_query_dict(
         """
         SELECT TABLE_NAME
@@ -172,7 +122,7 @@ async def _validate_mysql_supervisor_schema(connection) -> None:
     )
     if not table_rows:
         raise RuntimeError(
-            "数据库缺少表 sys_supervisor_service，请先执行 Aerich 升级：APP_ENV=dev .venv/bin/aerich upgrade"
+            f"数据库缺少表 {SUPERVISOR_SERVICE_TABLE}，请先手工执行 {BASELINE_SCHEMA_SQL_PATH}"
         )
 
     columns = await _load_mysql_supervisor_columns(connection)
@@ -180,8 +130,8 @@ async def _validate_mysql_supervisor_schema(connection) -> None:
     problems = find_supervisor_service_schema_problems(columns, indexes)
     if problems:
         raise RuntimeError(
-            "数据库结构落后于当前版本，请先执行 Aerich 升级：APP_ENV=dev .venv/bin/aerich upgrade；"
-            f"当前问题：{'；'.join(problems)}"
+            "数据库结构落后于当前版本，请先手工执行 "
+            f"{LEGACY_FIX_SCHEMA_SQL_PATH}；当前问题：{'；'.join(problems)}"
         )
 
 
@@ -205,7 +155,7 @@ def build_mysql_dsn(settings: Settings) -> str:
 
 
 def build_tortoise_config(settings: Settings, *, connection_url: str | None = None) -> dict[str, object]:
-    """构造 Tortoise/Aerich 共用配置。"""
+    """构造 Tortoise ORM 运行配置。"""
     return {
         "connections": {
             "default": connection_url or build_mysql_dsn(settings),
@@ -255,55 +205,12 @@ async def transaction_context():
         yield connection
 
 
-def _load_db_config_for_aerich() -> tuple[str, int, str, str, str]:
-    """为 Aerich 复用与应用一致的 APP_ENV/.env.* 解析规则。"""
-    runtime_environ, config_data, _ = _resolve_external_runtime_sources()
-    host = (runtime_environ.get("DATABASE_HOST") or _get_nested(config_data, "database", "host", default=DEFAULT_DATABASE_HOST) or DEFAULT_DATABASE_HOST).strip()
-    port = int(runtime_environ.get("DATABASE_PORT") or _get_nested(config_data, "database", "port", default=DEFAULT_DATABASE_PORT) or DEFAULT_DATABASE_PORT)
-    database = str(
-        runtime_environ.get("DATABASE_NAME")
-        or _get_nested(config_data, "database", "name", default=DEFAULT_DATABASE_NAME)
-        or DEFAULT_DATABASE_NAME
-    ).strip()
-    user = str(
-        runtime_environ.get("DATABASE_USER")
-        or _get_nested(config_data, "database", "user", default=DEFAULT_DATABASE_USER)
-        or DEFAULT_DATABASE_USER
-    ).strip()
-    password = str(runtime_environ.get("DATABASE_PASSWORD") or _get_nested(config_data, "database", "password", default="") or "")
-    return host, port, database, user, password
-
-
-def _build_aerich_default_dsn() -> str:
-    host, port, database, user, password = _load_db_config_for_aerich()
-    return f"mysql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}?charset=utf8mb4"
-
-
-def get_tortoise_orm(settings: Settings) -> dict[str, object]:
-    """为调用方显式提供 ORM 配置。"""
-    return build_tortoise_config(settings)
-
-
-# Aerich 与应用共享同一份 Tortoise 配置，避免“应用能连、迁移命令却读了另一套环境变量”的双轨行为。
-TORTOISE_ORM = {
-    "connections": {
-        "default": _build_aerich_default_dsn(),
-    },
-    "apps": {
-        "models": MODELS_APP,
-    },
-    "use_tz": False,
-    "timezone": "UTC",
-}
-
-
 __all__ = [
-    "TORTOISE_ORM",
     "build_mysql_dsn",
     "build_sqlite_test_config",
     "build_tortoise_config",
     "close_database",
-    "get_tortoise_orm",
+    "find_supervisor_service_schema_problems",
     "init_database",
     "transaction_context",
 ]
